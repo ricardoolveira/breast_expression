@@ -1,0 +1,3237 @@
+---
+title: "2_Expression_Analysis_Part2.2"
+author: "Ricardo Oliveira"
+date: "2024-09-04"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# EXPRESSÃO DIFERENCIAL GÊNICA EM AMOSTRAS GERAIS DE CÂNCER (982 X 113) DE CANCER DE MAMA
+
+
+#### Obs 1: Realizei a junção destas tabelas manualmente, pois não entendi nada do código de junção das colunas. !Marcar para conversar sobre.
+
+#### Obs 2: Realizei neste código a expressão dos genes da fosforilação oxidativa, glicólise e os dois juntos.
+
+#### Passo 1.A: Carregar nossa tabela de counts e realizar a análise de expressão diferencial pareada!
+
+#### Passo 1.B: Realizar tabela de amostras
+
+
+```{r}
+# pacotes
+library(tidyverse)
+library(DESeq2)
+library(EnhancedVolcano)
+library(cowplot)
+library(annotate)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(GO.db)
+library(apeglm)
+library(ggforce)
+library(umap)
+library(dplyr)
+library(pheatmap)
+library(RColorBrewer)
+
+# carregando o data.frame
+counts_ger_BRCA <- read.delim("C:/Users/ricar/Documents/Mestrado_Rstudio_org/Qualificação/Defesa_Final/Expressao_Mestrado/counts_brca.txt")
+
+# realizando a filtragem para trabalhar apenas com os genes que codificam proteínas
+unique(counts_ger_BRCA$gene_type)
+
+# filtrando BRCA
+counts_ger_BRCA <- subset(counts_ger_BRCA, gene_type %in% c("protein_coding")) # diminuir o número de erros possíveis
+
+# deixando para análise tumoral
+counts_ger_BRCA_a <- counts_ger_BRCA
+
+```
+
+### Agora precisamos pegar as amostras de tecido adjacente para pode juntar com as minhas amostras de tecido tumoral, realizarei duas expressões diferenciais apenas para verificar se existe alguma diferença. Entre 1095 x 113 e 982 x 113.
+
+#### Vamos carregar nossa tabela de counts que possui as amostras adjacentes e retirar elas de lá.
+
+```{r}
+# carregando o data.frame de amostras paredas, onde as primeiras 113 amostras (retirando os detalhes do genes) são de amostras adjacentes
+counts_par_BRCA <- read.delim("C:/Users/ricar/Documents/Mestrado_Rstudio_org/Qualificação/Defesa_Final/Expressao_Mestrado/counts_par_brca.txt")
+
+# filtrando BRCA
+counts_par_BRCA <- subset(counts_par_BRCA, gene_type %in% c("protein_coding")) # diminuir o número de erros possíveis
+
+# vamos pegar apenas a primeiras 116 colunas agora
+counts_adj_BRCA <- counts_par_BRCA[, 1:116]
+
+```
+
+
+#### Agora iremos trabalhar retirando as 113 amostras que também estão em adjacente
+
+```{r}
+# lendo a tabela de amostras
+amostras_dados <- read.delim("C:/Users/ricar/Documents/Mestrado_Rstudio_org/banco_de_dados_tcga/TCGA-BRCA/gdc_sample_sheet.2023-10-20.tsv")
+
+head(amostras_dados)
+
+# realizando mudança amostras pegando os individups que doaram normal
+quais_sao <- subset(amostras_dados, Sample.Type %in% c("Solid Tissue Normal"))
+
+# transformando em vetor os indiivudos
+quais_sao_v <- quais_sao$Case.ID
+
+# agora pegando os individuos que doaram normal
+quais_sao_tumor <- subset(amostras_dados, Case.ID %in% quais_sao_v)
+
+# realizando mudança amostras pegando os individups que doaram normal, mas agora pegando qualquer tipo de amostra de tumor dele
+quais_sao_tumor <- subset(quais_sao_tumor, Sample.Type %in% c("Primary Tumor"))
+
+# Substituir as barras por pontos em cada elemento e criando um vetor
+vetor_amostras_corrigido <- gsub("-", ".", quais_sao_tumor$Sample.ID)
+
+# Indexação das colunas para manter, excluindo as colunas que você quer remover
+colunas_a_manter <- setdiff(names(counts_ger_BRCA), vetor_amostras_corrigido)
+
+# Criar um novo data frame apenas com as colunas que você quer manter
+counts_ger_BRCA <- counts_ger_BRCA[, colunas_a_manter]
+
+
+###### REALIZANDO A JUNÇÃO PARA A ANÁLISE DE EXPRESSÃO DIFERENCIAL
+# filtragem prot
+# para junção
+counts_ger_BRCA <- counts_ger_BRCA[, -c(1, 2, 3)]
+
+# para análise normal
+counts_tudo_heatmaap <- cbind(counts_adj_BRCA, counts_ger_BRCA)
+
+# retirando genes repetidos
+counts_tudo_heatmaap <- counts_tudo_heatmaap %>%
+  distinct(gene_name, .keep_all = TRUE)
+
+# deixando para análise posterior de vias 
+brca_rna_bind <- counts_tudo_heatmaap
+
+# retirando gene_name e gene_type
+counts_tudo_heatmaap <- counts_tudo_heatmaap[, -c(2, 3)]
+
+# criando um vetor das amostras
+names_vector <- names(counts_tudo_heatmaap[1, ])
+
+# para PCA de mito
+mito_counts_982 <- cbind(counts_par_BRCA, counts_ger_BRCA)
+
+# retirando genes repetidos
+mito_counts_982 <- mito_counts_982 %>%
+  distinct(gene_name, .keep_all = TRUE)
+
+# para heatmap
+counts_map <- cbind(counts_par_BRCA, counts_ger_BRCA)
+
+# retirando genes repetidos
+counts_map <- counts_map %>%
+  distinct(gene_name, .keep_all = TRUE)
+
+# retirando gene_id e gene_typ
+counts_map <- counts_map[, -c(1, 3)]
+
+# Definir o número de amostras "caso" e "normal" (no caso coloquei 114 pois a primeira coluna ainda tem a indetificação ensembl_gene_id que irei retirar posteriormente)
+
+num_Adjacente <- 114
+num_Tumor <- 982
+
+# Criar a coluna indicando "Adjacente" e "tumor"
+normal_caso <- c(rep("Adjacent", num_Adjacente), rep("Tumor", num_Tumor))
+
+# Criar o data.frame
+dadosamostras_2 <- data.frame(Sample = names_vector, Condition = normal_caso)
+
+head(dadosamostras_2)
+
+#Retirando primeira linha
+dadosamostras_2 <- dadosamostras_2[-1, ]
+
+head(dadosamostras_2)
+
+# Por isso irei forçar meu R a entender que meu referencial é o Adjacente
+dadosamostras_2$Condition <- as.factor(dadosamostras_2$Condition)
+dadosamostras_2$Condition <- relevel(dadosamostras_2$Condition, ref = "Adjacent")
+
+```
+
+
+#### Passo 2: Vou ter que fazer trabalhos com a tabela de informação de amostras pra poder realizar o PCA de outras informações.
+
+```{r}
+# carregando as inforamações das amostras
+clinical <- read.delim("~/Mestrado_Rstudio_org/banco_de_dados_tcga/TCGA-BRCA/clinical.cart.2023-10-20/clinical.tsv")
+
+# adicionando as informações dos dados moleculares
+# abrindo arquivo
+molecular_arq <- read.delim("C:/Users/ricar/Documents/Mestrado_Rstudio_org/banco_de_dados_tcga/brca_tcga_pan_can_atlas_2018/data_clinical_patient_01.txt")
+
+# Junta os dataframes com base na correspondência entre PATIENT_ID e case_submitter_id
+clinical <- merge(clinical, molecular_arq[, c("PATIENT_ID", "SUBTYPE")], by.x = "case_submitter_id", by.y = "PATIENT_ID", all.x = TRUE)
+
+# colocando um terceira coluna que será trabalhada
+dadosamostras_2$case_id <- substr(dadosamostras_2$Sample, 1, 12)
+
+# transformado para poder utilizar vetor
+dadosamostras_2$case_id <- gsub("\\.", "-", dadosamostras_2$case_id)
+
+# pegando as minhas amostras utilizadas 
+clinica_pareada <- dadosamostras_2$case_id
+
+# filtragem dos individuos utilizados
+clinical_pareadas <- subset(clinical, clinical$case_submitter_id %in% clinica_pareada)
+
+# Remover duplicatas com base na coluna 'Y'
+clinical_pareadas <- clinical_pareadas[!duplicated(clinical_pareadas$case_submitter_id), ]
+
+# Obtendo a ordem desejada
+ordem <- match(dadosamostras_2$case_id, clinical_pareadas$case_submitter_id)
+
+# Reordenando clinical_pareadas
+clinical_pareadas_ordenado <- clinical_pareadas[ordem, ]
+
+# Juntando tudo
+infor_amostras <- cbind(dadosamostras_2, clinical_pareadas_ordenado)
+
+# finalmente tenho meu dateset necessário para realizar o PCA com base nas informações clínicas. Vou apenas generealizar algumas coisas nele para não tanto trabalho pra gente. Pq eu vou fazer tudo de novo? Pq tem gente que tem expressão gênica e não tem análise de mutação! São informações mais adicionadas aqui na expressão.
+
+```
+
+#### Passo 3: Padronizando minha tabela. Pegar da mesma forma que fiz em mutações.
+
+```{r}
+
+# verificando as informações de sexo
+unique(infor_amostras$gender) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações de etnicidade
+unique(infor_amostras$ethnicity) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações de cor
+unique(infor_amostras$race) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações de status vital
+unique(infor_amostras$vital_status) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações de metastase
+unique(infor_amostras$ajcc_pathologic_m) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações de linfonodos
+unique(infor_amostras$ajcc_pathologic_n) # vamos juntar informações
+
+# Substitua os termos "N1mi|N1a|N1b|N1c" por "N1"
+infor_amostras$ajcc_pathologic_n <- gsub("N1mi|N1a|N1b|N1c", "N1", infor_amostras$ajcc_pathologic_n)
+
+# Substitua os termos "N2a" por "N2"
+infor_amostras$ajcc_pathologic_n <- gsub("N2a", "N2", infor_amostras$ajcc_pathologic_n)
+
+# Substitua os termos "N3a|N3b|N3c" por "N2"
+infor_amostras$ajcc_pathologic_n <- gsub("N3a|N3b|N3c", "N3", infor_amostras$ajcc_pathologic_n)
+
+# Substitua os termos "N0 (mol+)", "N0 (i-)", "N0 (i+)" por "N0"
+# Substitua os padrões individualmente
+infor_amostras$ajcc_pathologic_n <- gsub("N0 \\(mol\\+\\)|N0 \\(i-\\)|N0 \\(i\\+\\)", "N0", infor_amostras$ajcc_pathologic_n)
+
+# Exiba o resultado
+unique(infor_amostras$ajcc_pathologic_n)
+
+# verificando as informações de Estágio Molecular
+unique(infor_amostras$ajcc_pathologic_stage) # vamos juntar informações
+
+# Substituindo os padrões "Stage IA" e "Stage IB" para "Stage_I"
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage IA", "Stage_I", infor_amostras$ajcc_pathologic_stage)
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage IB", "Stage_I", infor_amostras$ajcc_pathologic_stage)
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage I$", "Stage_I", infor_amostras$ajcc_pathologic_stage)
+
+# Substituindo os padrões "Stage IIA" e "Stage IIB" para "Stage_II"
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage IIA", "Stage_II", infor_amostras$ajcc_pathologic_stage)
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage IIB", "Stage_II", infor_amostras$ajcc_pathologic_stage)
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage II$", "Stage_II", infor_amostras$ajcc_pathologic_stage)
+
+# Substituindo os padrões "Stage IIIA", "Stage IIIB" e "Stage IIIC" para "Stage_III"
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage IIIA", "Stage_III", infor_amostras$ajcc_pathologic_stage)
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage IIIB", "Stage_III", infor_amostras$ajcc_pathologic_stage)
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage IIIC", "Stage_III", infor_amostras$ajcc_pathologic_stage)
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage III$", "Stage_III", infor_amostras$ajcc_pathologic_stage)
+
+# Substituindo o padrão "Stage IV" para "Stage_IV"
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage IV", "Stage_IV", infor_amostras$ajcc_pathologic_stage)
+
+# Substituindo qualquer padrão vazio ou não relatado para "Not_Reported"
+infor_amostras$ajcc_pathologic_stage <- gsub("Stage X|Not Reported|Not_Reported", "NA", infor_amostras$ajcc_pathologic_stage)
+
+# Verificando as informações de Estágio Molecular final
+print(unique(infor_amostras$ajcc_pathologic_stage))
+
+# verificando as informações de Estágio Molecular
+unique(infor_amostras$ajcc_pathologic_stage)
+
+# verificando as informações de Tamanho do Tumor
+unique(infor_amostras$ajcc_pathologic_t) # vamos juntar informações
+
+
+# Substitua os padrões individualmente "T1a|T1b|T1c"
+infor_amostras$ajcc_pathologic_t <- gsub("T1a|T1b|T1c", "T1", infor_amostras$ajcc_pathologic_t)
+
+unique(infor_amostras$ajcc_pathologic_t)
+
+infor_amostras$ajcc_pathologic_t <- gsub("T2a|T2b", "T2", infor_amostras$ajcc_pathologic_t)
+
+unique(infor_amostras$ajcc_pathologic_t)
+
+infor_amostras$ajcc_pathologic_t <- gsub("T3a", "T3", infor_amostras$ajcc_pathologic_t)
+
+unique(infor_amostras$ajcc_pathologic_t)
+
+infor_amostras$ajcc_pathologic_t <- gsub("T4b|T4d", "T4", infor_amostras$ajcc_pathologic_t)
+
+unique(infor_amostras$ajcc_pathologic_t)
+
+# verificando as informações do local de origem do câncer
+unique(infor_amostras$tissue_or_organ_of_origin) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações do tipo histologico do cancer
+unique(infor_amostras$primary_diagnosis) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# Substitua todos os valores '-- ' por NA em todo o dataframe
+infor_amostras[infor_amostras == "'--"] <- "NA"
+
+# verificando termos
+unique(infor_amostras$SUBTYPE)
+
+# generalizando
+infor_amostras$SUBTYPE <- gsub("BRCA_LumA", "Luminal_A", infor_amostras$SUBTYPE)
+
+infor_amostras$SUBTYPE <- gsub("BRCA_LumB", "Luminal_B", infor_amostras$SUBTYPE)
+
+infor_amostras$SUBTYPE <- gsub("BRCA_Her2", "HER2", infor_amostras$SUBTYPE)
+
+infor_amostras$SUBTYPE <- gsub("BRCA_Normal|BRCA_Basal", "TNBC", infor_amostras$SUBTYPE)
+
+# Substitui os valores vazios por NA na coluna SUBTYPE
+infor_amostras$SUBTYPE[infor_amostras$SUBTYPE == ""] <- "NA"
+
+# Substitui os valores vazios por NA na coluna SUBTYPE
+infor_amostras$SUBTYPE[is.na(infor_amostras$SUBTYPE)] <- "NA"
+
+# Verificando os valores únicos após a substituição
+unique(infor_amostras$SUBTYPE)
+
+
+# refazendo tabela
+dadosamostras_2 <- NULL
+
+dadosamostras_2$Sample <- infor_amostras$Sample
+
+dadosamostras_2$Condition <- infor_amostras$Condition
+
+dadosamostras_2$Metastais <- infor_amostras$ajcc_pathologic_m
+
+dadosamostras_2$Linfonodes <- infor_amostras$ajcc_pathologic_n
+
+dadosamostras_2$Size <- infor_amostras$ajcc_pathologic_t
+
+dadosamostras_2$Stage <- infor_amostras$ajcc_pathologic_stage
+
+dadosamostras_2$Status <- infor_amostras$vital_status
+
+dadosamostras_2$Days_to_last_follow_up <- infor_amostras$days_to_last_follow_up
+
+dadosamostras_2$Overral_Response <- infor_amostras$days_to_last_known_disease_status
+
+dadosamostras_2$Molecular_Subtype <- infor_amostras$SUBTYPE
+
+dadosamostras_2$Age <- infor_amostras$age_at_index
+
+dadosamostras_2 <- as.data.frame(dadosamostras_2)
+
+row.names(dadosamostras_2) <- dadosamostras_2$Sample
+
+```
+
+# Realizando um A ANÁLISE DE EXPRESSAO DIFERENCIAL com base no tecido adjacente (113) e o tumoral (982)
+
+```{r}
+# Crie o DESeqDataSet e realize a expressao diferencial - DE TODAS AS PROTEÍNAS
+exp_brca <- DESeqDataSetFromMatrix(countData = counts_tudo_heatmaap,
+                                                 colData = dadosamostras_2,
+                                                 design = ~ Molecular_Subtype + Stage + Condition, tidy = TRUE) 
+
+# Normalizando e Realizando a análise de Expressão Diferencial
+dds_brca <- DESeq(exp_brca)
+
+# Filtrando genes com contagens muito baixas e poucos grupos de pessoas expressando
+# ao menos 20 pessoas expressando por grupo
+smallestGroupSize <- 20
+
+# filtrando
+keep <- rowSums(counts(dds_brca) >= 30) >= smallestGroupSize
+
+# repassando os resultados de filtragem
+dds_brca <- dds_brca[keep,]
+
+# especificando o grupo
+
+dds_brca_982 <- dds_brca
+
+# contraste
+resultsNames(dds_brca_982)
+
+# conteúdo
+summary(dds_brca_982)
+
+# retirada de vieses de outliers nas amostras
+# pacote necessario 
+
+# fazendo
+resLFC_982 <- lfcShrink(dds_brca_982, coef="Condition_Tumor_vs_Adjacent", type="apeglm")
+
+# conteúdo
+summary(resLFC_982)
+
+# transformando meus resultados em data.frame
+dds_res_brca_982 <- as.data.frame(resLFC_982)
+
+# passando os resultados para um data.frame
+#dds_results_brca <- as.data.frame(dds_results_brca)
+
+# head(dds_results_brca)
+
+# AGORA MAIS UMA VEZ VAMOS MEXER NO NOSSO DATA.FRAME, MAS BUSCANDO ALTERAR OS GENES QUE ESTÃO EM ENSEMBL PARA GENE_NAME PARA MELHOR VISUALIZAÇÃO E ENTENDIMENTO.
+
+# mudar os ensembl para nome dos genes
+
+# colocando os ensembl em uma coluna possível de trabalhar
+dds_res_brca_982$ensembl <- row.names(dds_res_brca_982)
+
+
+# AGORA MAIS UMA VEZ VAMOS MEXER NO NOSSO DATA.FRAME, MAS BUSCANDO ALTERAR OS GENES QUE ESTÃO EM ENSEMBL PARA GENE_NAME PARA MELHOR VISUALIZAÇÃO E ENTENDIMENTO.
+
+# mudar os ensembl para nome dos genes
+
+# colocando os ensembl em uma coluna possível de trabalhar
+dds_res_brca_982$ensembl <- row.names(dds_res_brca_982)
+
+# retirando a identificação que vem depois do nome do ensembl que é basicamente da versão que vem aquele ensembl
+dds_res_brca_982$ensembl <- sub("\\..*", "", dds_res_brca_982$ensembl)
+
+head(dds_res_brca_982)
+
+columns(org.Hs.eg.db)
+
+# ALTERANDO ENSEMBL PARA GENENAME E ENTREZID
+res_mestrado_brca_982 <- dds_res_brca_982 %>%
+  as.data.frame() %>%
+  mutate(dds_res_brca_982, entrez_id = AnnotationDbi::mapIds(org.Hs.eg.db,
+                                                                     keys= dds_res_brca_982$ensembl,
+                                                                     column="ENTREZID",
+                                                                     keytype="ENSEMBL",
+                                                                     multiVals="first"),
+         gene_name = AnnotationDbi::mapIds(org.Hs.eg.db,
+                                        keys=dds_res_brca_982$ensembl,
+                                        column="SYMBOL",
+                                        keytype="ENSEMBL",
+                                        multiVals="first"))
+
+
+write.table(res_mestrado_brca_982, "resultados_dea_982.txt", sep = "\t", quote = FALSE, col.names = T, row.names = F)
+
+
+```
+
+# Realizando o PCA
+
+#### Passo 1: PCA para visualizar a variância de expressão entre as amostras
+
+
+```{r}
+# Pegando os dados normalizados
+vsd <- vst(dds_brca_982, blind=FALSE)
+
+# Plotando o PCA
+plotPCA(vsd, intgroup=c("Condition"))
+
+a_pca_982_s <- plotPCA(vsd, intgroup=c("Condition", "Stage"))
+
+a_pca_982_s
+
+a_pca_982_m <- plotPCA(vsd, intgroup=c("Condition", "Molecular_Subtype"))
+
+a_pca_982_m
+
+```
+
+# Formando os vetores para filtrar os genes ALVO
+
+#### Vamos carregar os genes mitocondriais e filtrar de acordo com os processos
+
+```{r}
+# pegando os genes da Fosforilação Oxidativa no Mitoxplorer
+human_gene_function <- read.delim2("~/Mestrado_Rstudio_org/human_gene_function.txt")
+
+# Filtrar linhas com 'Oxidative Phosphorylation'
+
+unique(human_gene_function$mito_process)
+
+# OXPHOS
+subset_oxphos <- subset(human_gene_function, mito_process %in% c('Oxidative Phosphorylation'))
+
+head(subset_oxphos)
+
+# Transformando a coluna HGNC_symbol em Vetor
+genes_oxphos <- subset_oxphos$NCBI_GeneID
+
+# Glicolise
+subset_glico <- subset(human_gene_function, mito_process %in% c('Glycolysis'))
+
+# Transformando a coluna HGNC_symbol em Vetor
+genes_glico <- subset_glico$NCBI_GeneID
+
+# OXPHOS e Glico juntos
+subset_oxgl <- subset(human_gene_function, mito_process %in% c('Oxidative Phosphorylation', 'Glycolysis'))
+
+head(subset_oxgl)
+
+# Transformando a coluna HGNC_symbol em Vetor
+genes_oxgl <- subset_oxgl$HGNC_symbol
+
+# Genes mito
+genes_mito_todos <- human_gene_function$NCBI_GeneID
+
+```
+
+# PARA OXPHOS
+
+```{r}
+# filtragem de genes da OXPHOS
+res_BRCA_oxphos <- subset(res_mestrado_brca_982, entrez_id %in% genes_oxphos)
+
+
+write.table(res_BRCA_oxphos, "res_BRCA_oxp982.txt", quote = F, sep = "\t", row.names = F, col.names = T)
+
+# DEMONSTRANDO MEUS RESULTADOS
+# Definir um limiar de p-value para destacar genes significativos
+p_value_threshold <- 0.05
+
+# Criar o Volcano Plot Geral com P-valor igual ou menor que 0.05
+c <- EnhancedVolcano::EnhancedVolcano(res_BRCA_oxphos,
+                                 lab = res_BRCA_oxphos$gene_name,
+                                 x = 'log2FoldChange',
+                                 y = 'padj',
+                                 selectLab = c("COX7B2", "COX6C", "SCO2", "C15orf48", "TSTD1", "UQCC2", "DONSON", "COA6", "CISD3", "NDUFAF6", "UQCC3", "COX7A1", "GPD1"),
+                                 xlab = bquote(~Log[2]~ 'fold change'),
+                                 ylim = c(0,170),
+                                 xlim = c(-8,8),
+                                 pCutoff = 0.05,
+                                 FCcutoff = 1,
+                                 pointSize = 4.5,
+                                 labSize = 4.5,
+                                 colCustom = NULL,
+                                 legendLabSize = 12,
+                                 legendPosition = 'bottom',
+                                 legendIconSize = 5.0,
+                                 boxedLabels = TRUE,
+                                 drawConnectors = TRUE,
+                                 labCol = 'black',
+                                 labFace = 'bold',
+                                 colAlpha = 1,
+                                 widthConnectors = 0.75,
+                                 colConnectors = 'grey50',
+                                 gridlines.major = TRUE,
+                                 gridlines.minor = FALSE,
+                                 caption = bquote(~Log[2]~ "fold change cutoff, 1; padj cutoff, 0.05"),
+                                 border = 'partial',
+                                 borderWidth = 1,
+                                 borderColour = 'black',
+                                 title = "",
+                                 subtitle = "")
+
+c
+
+# idealizando quais serão
+gene_symbols <- c("COX7B2", "COX6C", "SCO2", "C15orf48", "TSTD1", "UQCC2", "DONSON", "COA6", "CISD3", "NDUFAF6", "UQCC3", "COX7A1", "GPD1")
+
+genes <- c("ENSG00000170516.17", "ENSG00000164919.11" , "ENSG00000284194.3", "ENSG00000166920.13", "ENSG00000215845.11", "ENSG00000137288.10", "ENSG00000159147.18", "ENSG00000168275.16", "ENSG00000277972.2", "ENSG00000156170.13", "ENSG00000204922.5", "ENSG00000161281.11", "ENSG00000167588.13")
+
+letters <- c("A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "L", "M", "N")
+
+# Lista para armazenar os plots individuais
+plots <- list()
+
+# Loop para criar os plots para cada gene
+for (i in 1:length(genes)) {
+  gene <- genes[i]
+  letter <- letters[i]
+  
+  plot_FBP2 <- plotCounts(dds_brca_982, 
+                          gene = gene, 
+                          intgroup = "Condition",
+                          returnData = TRUE)
+  
+  p <- ggplot(plot_FBP2, 
+              aes(x = Condition, 
+                  y = count,
+                  fill = Condition)) +
+    geom_boxplot() + 
+    geom_jitter(color="black", size=0.4, alpha=0.9) + 
+    guides(fill = "none") + 
+    ylab("Normalized Counts") + 
+    scale_y_log10() +
+    theme_light() +
+    theme(legend.position = "none") + 
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+    theme(axis.title.x = element_blank()) +
+    ggtitle(gene) +
+    theme(plot.title = element_text(size = 12))
+  
+  # Dicionário de correspondência entre os nomes Ensembl e os símbolos dos genes
+  gene_dict <- setNames(gene_symbols, genes)
+  
+  # Atualize o título do gráfico com os símbolos dos genes
+  p <- p + ggtitle(gene_dict[gene])
+  
+  # Adicione as letras ao lado esquerdo do nome do gene
+  p <- p + annotate("text", x = -Inf, y = -Inf, label = letter, hjust = 1, vjust = 0)
+  
+  
+  plots[[gene]] <- p
+  
+}
+
+# Combine os gráficos usando plot_grid
+ratio_b <- plot_grid(plotlist = plots, ncol = 7)
+
+
+# Exiba o layout
+print(ratio_b)
+
+```
+
+# Para genes da Glicolise
+
+```{r}
+# filtragem de genes da Glicolise
+res_BRCA_glico <- subset(res_mestrado_brca_982, entrez_id %in% genes_glico)
+
+write.table(res_BRCA_glico, "res_BRCA_gli982.txt", quote = F, sep = "\t", row.names = F, col.names = T)
+
+# DEMONSTRANDO MEUS RESULTADOS
+library(ggplot2)
+library(ggforce)
+library(EnhancedVolcano)
+library(cowplot)
+
+# Definir um limiar de p-value para destacar genes significativos
+p_value_threshold <- 0.05
+
+# Criar o Volcano Plot Geral com P-valor igual ou menor que 0.05
+d <- EnhancedVolcano::EnhancedVolcano(res_BRCA_glico,
+                                 lab = res_BRCA_glico$gene_name,
+                                 x = 'log2FoldChange',
+                                 y = 'padj',selectLab = c("PCK1", "SLC2A4", "FBP2", "ENO3", "ALDOC", "PC", "LDHB", "GCK","ALDOA", "SLC2A1", "ENO2"),
+                                 xlab = bquote(~Log[2]~ 'fold change'),
+                                 ylim = c(0,250),
+                                 xlim = c(-6,6),
+                                 pCutoff = 0.05,
+                                 FCcutoff = 1,
+                                 pointSize = 4.5,
+                                 labSize = 4.5,
+                                 colCustom = NULL,
+                                 legendLabSize = 12,
+                                 legendPosition = 'bottom',
+                                 legendIconSize = 5.0,
+                                 boxedLabels = TRUE,
+                                 drawConnectors = TRUE,
+                                 labCol = 'black',
+                                 labFace = 'bold',
+                                 colAlpha = 1,
+                                 widthConnectors = 0.75,
+                                 colConnectors = 'grey50',
+                                 gridlines.major = TRUE,
+                                 gridlines.minor = FALSE,
+                                 caption = bquote(~Log[2]~ "fold change cutoff, 1; padj cutoff, 0.05"),
+                                 border = 'partial',
+                                 borderWidth = 1,
+                                 borderColour = 'black',
+                                 title = "",
+                                 subtitle = "")
+
+d
+
+cowplot::plot_grid(b, d, ncol = 2, align = "hv", labels = LETTERS[1:2])
+cowplot::plot_grid(a, c, ncol = 2, align = "hv", labels = LETTERS[3:4])
+
+# idealizando quais serão
+gene_symbols <- c("PCK1", "SLC2A4", "FBP2", "ENO3", "ALDOC", "PC", "LDHB", "GCK","ALDOA", "SLC2A1", "ENO2")
+
+
+genes <- c("ENSG00000124253.11", "ENSG00000181856.15", "ENSG00000130957.5", "ENSG00000108515.18", "ENSG00000109107.14", "ENSG00000173599.15", "ENSG00000111716.14", "ENSG00000106633.17", "ENSG00000149925.22", "ENSG00000117394.24", "ENSG00000111674.9")
+
+letters <- c("A", "B", "C", "D", "E", "F", "G", "H", "I", "J")
+
+# Lista para armazenar os plots individuais
+plots <- list()
+
+# Loop para criar os plots para cada gene
+for (i in 1:length(genes)) {
+  gene <- genes[i]
+  letter <- letters[i]
+  
+  plot_FBP2 <- plotCounts(dds_brca_982, 
+                          gene = gene, 
+                          intgroup = "Condition",
+                          returnData = TRUE)
+  
+  p <- ggplot(plot_FBP2, 
+              aes(x = Condition, 
+                  y = count,
+                  fill = Condition)) +
+    geom_boxplot() + 
+    geom_jitter(color="black", size=0.4, alpha=0.9) + 
+    guides(fill = "none") + 
+    ylab("Normalized Counts") + 
+    scale_y_log10() +
+    theme_light() +
+    theme(legend.position = "none") + 
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+    theme(axis.title.x = element_blank()) +
+    ggtitle(gene) +
+    theme(plot.title = element_text(size = 12))
+  
+  # Dicionário de correspondência entre os nomes Ensembl e os símbolos dos genes
+  gene_dict <- setNames(gene_symbols, genes)
+  
+  # Atualize o título do gráfico com os símbolos dos genes
+  p <- p + ggtitle(gene_dict[gene])
+  
+  # Adicione as letras ao lado esquerdo do nome do gene
+  p <- p + annotate("text", x = -Inf, y = -Inf, label = letter, hjust = 1, vjust = 0)
+  
+  
+  plots[[gene]] <- p
+  
+}
+
+# Combine os gráficos usando plot_grid
+ratio_d <- plot_grid(plotlist = plots, ncol = 6)
+
+# Exiba o layout
+print(ratio_d)
+
+
+cowplot::plot_grid(ratio_a, ratio_b, ncol=1, labels=LETTERS[1:4])
+
+cowplot::plot_grid(ratio_c, ratio_d, ncol=1, labels=LETTERS[1:4])
+
+```
+
+
+# realizando apenas para genes do mitocondrial
+
+
+```{r}
+# filtragem de genes dos counts de genes da OXPHOS e Glicólise
+mito_counts_982 <- subset(mito_counts_982, gene_name %in% genes_oxgl)
+
+mito_counts_982 <- mito_counts_982[,-c(1,3)]
+
+# Crie o DESeqDataSet e realize a expressao diferencial - APENAS DO MITOCONDRIAL
+exp_brca_mt_982 <- DESeqDataSetFromMatrix(countData = mito_counts_982,
+                                                 colData = dadosamostras_2,
+                                                 design = ~ Molecular_Subtype + Stage + Condition, tidy = TRUE) #tidy igual a true para indicar que sua primeira coluna estão os genes e não dados de expressao gênica
+
+# Normalizando e Realizando a análise de Expressão Diferencial
+dds_brca_mt_982 <- DESeq(exp_brca_mt_982)
+
+# Filtrando genes com contagens muito baixas e poucos grupos de pessoas expressando
+# ao menos 20 pessoas expressando por grupo
+smallestGroupSize <- 20
+
+# filtrando
+keep <- rowSums(counts(dds_brca_mt_982) >= 30) >= smallestGroupSize
+
+# repassando os resultados de filtragem
+dds_brca_mt_982 <- dds_brca_mt_982[keep,]
+
+# Pegando os dados normalizados
+vsd <- varianceStabilizingTransformation(dds_brca_mt_982, blind=FALSE)
+
+# Plotando o PCA
+plotPCA(vsd, intgroup=c("Condition", "Stage"))
+
+a_pca_982_mito_mol <- plotPCA(vsd, intgroup=c("Condition", "Molecular_Subtype"))
+
+a_pca_982_mito_mol
+
+a_pca_982_mito <- plotPCA(vsd, intgroup=c("Condition"))
+
+a_pca_982_mito
+
+```
+
+
+### Fazendo um UMAP da expressão geral
+
+```{r}
+# fazendo um UMAP
+# Passo 2: Carregar os dados
+# Suponha que seus dados estejam em um arquivo CSV
+data <- counts_tudo_heatmaap
+
+data <- data[,-c(1)]
+
+# Passo 3: Substituir valores zero antes da transformação logarítmica
+# Adicionar uma pequena constante para evitar log(0)
+data[data == 0] <- 1
+data <- log2(data + 1e-9)
+
+# Transpor os dados para ter genes como colunas e amostras como linhas
+data_t <- t(data)
+
+# Criar um vetor de labels para diferenciar as amostras
+labels <- c(rep("Adjacent", 113), rep("Tumor", 982))
+
+# Passo 4: Executar o UMAP
+umap_result <- umap(data_t)
+
+# Passo 5: Visualizar os resultados
+# Criar um data frame com os resultados do UMAP e os labels
+umap_df <- data.frame(UMAP1 = umap_result$layout[,1], UMAP2 = umap_result$layout[,2], Label = labels)
+
+# Definir as cores desejadas
+cores <- c("Adjacent" = "#AEC6CF", "Tumor" = "#C3B1E1") # Azul pastel e roxo pastel
+
+# Plotar os resultados com cores personalizadas
+m0001 <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Label)) +
+  geom_point(size = 4) +
+  labs(title = "UMAP projection of gene expression data",
+       x = "UMAP1", y = "UMAP2") +
+  scale_color_manual(values = cores) +
+  theme_minimal()
+
+m0001
+
+# Passo 5: Visualizar os resultados
+teste_2000 <- dadosamostras_2
+
+teste_2000[teste_2000 == "NA"] <- NA
+
+# Criar um data frame com os resultados do UMAP e os labels
+umap_df <- data.frame(UMAP1 = umap_result$layout[,1], UMAP2 = umap_result$layout[,2], Label = teste_2000$Molecular_Subtype)
+
+
+# Plotar os resultados
+m0002 <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Label)) +
+  geom_point(size = 3, na.rm = T) +
+  labs(title = "UMAP projection of gene expression data",
+       x = "UMAP1", y = "UMAP2") +
+  theme_minimal()
+
+m0002
+
+# Suponha que você tenha duas características para visualizar: Molecular_Subtype e Treatment
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Treatment = teste_2000$Condition,
+  Molecular_Subtype = teste_2000$Molecular_Subtype)
+
+# Criar uma coluna concatenada para múltiplas labels
+umap_df$Combined_Label <- paste(umap_df$Treatment, umap_df$Molecular_Subtype, sep = " - ")
+
+# Visualizar UMAP com a coluna de labels combinados
+m0003 <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Combined_Label)) +
+  geom_point(size = 3, na.rm = TRUE) +
+  theme_minimal() +
+  labs(title = "UMAP Visualization by Combined Labels")
+
+m0003
+
+# Visualizar UMAP com facetas para Molecular_Subtype
+m0004 <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(aes(color = Molecular_Subtype)) +
+  theme_minimal() +
+  labs(title = "UMAP Visualization by Molecular Subtype") +
+  facet_wrap(~ Molecular_Subtype)
+
+m0004
+
+# Visualizar UMAP com facetas para Treatment
+m0005 <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(size = 3, aes(color = Treatment)) +
+  theme_minimal() +
+  labs(title = "UMAP Visualization by Sample Type") +
+  facet_wrap(~ Treatment) +
+  theme(
+  legend.title = element_text(size = 12),   # Tamanho do texto do título da legenda
+  legend.text = element_text(size = 12),    # Tamanho do texto das entradas da legenda
+  legend.key.size = unit(0.7, "cm")          # Tamanho das chaves da legenda
+)
+
+m0005
+
+```
+
+### Fazendo um UMAP APENAS DA EXPRESSÃO MITOCONDRIAL
+
+```{r}
+#### GENES DA FOSFORILAÇÃO OXIDATIVA E GLICOLÍSE UMAP
+# Passo 2: Carregar os dados
+# Suponha que seus dados estejam em um arquivo CSV
+data <- mito_counts_982
+
+data <- data[,-1]
+
+# Passo 3: Substituir valores zero antes da transformação logarítmica
+# Adicionar uma pequena constante para evitar log(0)
+data[data == 0] <- 1
+data <- log2(data + 1e-9)
+
+# Transpor os dados para ter genes como colunas e amostras como linhas
+data_t <- t(data)
+
+colnames(data_t) <- mito_counts_982$gene_name
+
+# Passo 4: Executar o UMAP
+umap_result <- umap(data_t)
+
+# Passo 5: Visualizar os resultados
+teste_2000 <- dadosamostras_2
+
+teste_2000[teste_2000 == "Not_Reported"] <- NA
+
+# Criar um data frame com os resultados do UMAP e os labels
+umap_df <- data.frame(UMAP1 = umap_result$layout[,1], UMAP2 = umap_result$layout[,2], Label = teste_2000$Molecular_Subtype)
+
+
+# Plotar os resultados
+m0006 <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Label)) +
+  geom_point(size = 3, na.rm = T) +
+  labs(title = "UMAP projection of gene expression data",
+       x = "UMAP1", y = "UMAP2") +
+  theme_minimal()
+
+m0006
+
+# Suponha que você tenha duas características para visualizar: Molecular_Subtype e Treatment
+m0007 <- umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Treatment = teste_2000$Condition,
+  Molecular_Subtype = teste_2000$Molecular_Subtype)
+
+m0007
+
+# Criar uma coluna concatenada para múltiplas labels
+umap_df$Combined_Label <- paste(umap_df$Treatment, umap_df$Molecular_Subtype, sep = " - ")
+
+# Visualizar UMAP com a coluna de labels combinados
+m0008 <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Combined_Label)) +
+  geom_point(size = 3, na.rm = TRUE) +
+  theme_minimal() +
+  labs(title = "UMAP Visualization by Combined Labels")
+
+m0008
+
+# Visualizar UMAP com facetas para Treatment
+m0009 <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(size = 1, aes(color = Molecular_Subtype)) +
+  theme_minimal() +
+  labs(title = "UMAP Visualization by Sample Type") +
+  facet_wrap(~ Molecular_Subtype) +
+  theme(
+  legend.title = element_text(size = 12),   # Tamanho do texto do título da legenda
+  legend.text = element_text(size = 12),    # Tamanho do texto das entradas da legenda
+  legend.key.size = unit(0.7, "cm")          # Tamanho das chaves da legenda
+)
+
+m0009
+
+```
+
+### PHEATMAP
+
+```{r}
+# realizando a análise de expressão diferencial com todo o grupo de cluster
+# Crie o DESeqDataSet e realize a expressao diferencial - DE TODAS AS PROTEÍNAS
+exp_brca_h <- DESeqDataSetFromMatrix(countData = counts_map,
+                                                 colData = dadosamostras_2,
+                                                 design = ~ Molecular_Subtype + Stage + Condition, tidy = TRUE) 
+
+# Normalizando e Realizando a análise de Expressão Diferencial
+dds_brca_h <- DESeq(exp_brca_h)
+
+# Filtrando genes com contagens muito baixas e poucos grupos de pessoas expressando
+# ao menos 20 pessoas expressando por grupo
+smallestGroupSize <- 20
+
+# filtrando
+keep <- rowSums(counts(dds_brca_h) >= 30) >= smallestGroupSize
+
+# repassando os resultados de filtragem
+dds_brca_h <- dds_brca_h[keep,]
+
+# especificando o grupo
+rld = vst(dds_brca_h, blind = F)
+
+sampleDists = dist(t(assay(rld)))
+
+# biblioteca necessaria
+sampleDistMatrix = as.matrix(sampleDists)
+
+colnames(sampleDistMatrix)
+
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+# Gerando heatmap simples e completo
+# pheatmap(sampleDistMatrix,
+#         clustering_distance_rows = sampleDists,
+#         clustering_distance_cols = sampleDists,
+#         col = colors)
+
+# gerando um heatmap dos meus genes alvo
+# top_genes <- c("ENSG00000170516.17", "ENSG00000164919.11" , "ENSG00000284194.3", "ENSG00000166920.13", "ENSG00000215845.11", "ENSG00000137288.10", "ENSG00000159147.18", "ENSG00000168275.16", "ENSG00000277972.2", "ENSG00000156170.13", "ENSG00000204922.5", "ENSG00000161281.11", "ENSG00000167588.13", "ENSG00000124253.11", "ENSG00000181856.15", "ENSG00000130957.5", "ENSG00000108515.18", "ENSG00000109107.14", "ENSG00000173599.15", "ENSG00000111716.14", "ENSG00000106633.17", "ENSG00000149925.22", "ENSG00000117394.24", "ENSG00000111674.9")
+
+top_genes <- c("COX7B2", "COX6C", "SCO2", "C15orf48", "TSTD1", "UQCC2", "DONSON", "COA6", "CISD3", "NDUFAF6", "UQCC3", "COX7A1", "GPD1", "PCK1", "SLC2A4", "FBP2", "ENO3", "ALDOC", "PC", "LDHB", "GCK","ALDOA", "SLC2A1", "ENO2")
+
+top_genes <- unique(top_genes)
+
+# Passo 2: Filtre a matriz de expressão
+rownames(dadosamostras_2) <- colnames(assay(rld)[top_genes,])
+
+# geral
+selected_annotations <- dadosamostras_2[, c("Condition", "Stage", "Molecular_Subtype")]
+
+# Define a custom pastel color palette for Stage
+stage_colors <- c("NA" = "#FFB6C1",    # Light Pink
+                  "Stage_I" = "#A3C1DA", # Pastel Blue
+                  "Stage_II" = "#FFB347", # Pastel Orange
+                  "Stage_III" = "#B2D8B2", # Pastel Green
+                  "Stage_IV" = "#FF6F61") # Pastel Red
+
+# Define a custom pastel color palette for Molecular_Subtype
+molecular_subtype_colors <- c("HER2" = "#BBB3BA",  # Pastel Pink
+                               "Luminal_A" = "#FFDFBA",  # Pastel Peach
+                               "Luminal_B" = "#FBBBBA",  # Pastel Yellow
+                               "TNBC" = "#BAFFC9",  # Pastel Mint Green
+                               "NA" = "#BAE1FF")  # Pastel Blue
+
+# Update the pheatmap function
+heatmap_982 <- pheatmap(assay(rld)[top_genes,], 
+                         cluster_rows = TRUE, 
+                         show_rownames = TRUE, 
+                         cluster_cols = TRUE, 
+                         show_colnames = FALSE, 
+                         fontsize_row = 8, 
+                         annotation_col = selected_annotations,
+                         annotation_colors = list(Stage = stage_colors, Molecular_Subtype = molecular_subtype_colors)) # o false no cluster cols serve para manter na ordem das amostras ou da primeira condição que no caso aqui é "condicao" kk
+
+heatmap_982
+
+```
+
+
+# Análise da expressão com base no subtipo molecular 
+
+
+```{r}
+# pegar apenas as amostras tumorais
+# genes a serem filtrados
+unique_ensembl_ids <- c("ENSG00000170516.17", "ENSG00000164919.11" , "ENSG00000284194.3", "ENSG00000166920.13", "ENSG00000215845.11", "ENSG00000137288.10", "ENSG00000159147.18", "ENSG00000168275.16", "ENSG00000277972.2", "ENSG00000156170.13", "ENSG00000204922.5", "ENSG00000161281.11", "ENSG00000167588.13", "ENSG00000124253.11", "ENSG00000181856.15", "ENSG00000130957.5", "ENSG00000108515.18", "ENSG00000109107.14", "ENSG00000173599.15", "ENSG00000111716.14", "ENSG00000106633.17", "ENSG00000149925.22", "ENSG00000117394.24", "ENSG00000111674.9")
+
+# genes alvo
+para_plotar <- subset(counts_ger_BRCA_a, gene_id %in% unique_ensembl_ids)
+
+para_plotar <- para_plotar[, c(-1,-3)]
+
+# Transpor o data frame
+para_plotar <- t(para_plotar)
+
+# Converter a matriz resultante de volta para um data frame
+para_plotar <- as.data.frame(para_plotar)
+
+# ajuste das tabelas
+colnames(para_plotar) <- para_plotar[1, ]
+para_plotar <- para_plotar[-1, ]
+
+para_plotar$id_amostra <- row.names(para_plotar)
+
+# pegando as amostras tumorais
+amostras_de_tumor <- row.names(para_plotar)
+
+# começando formação de tabela clinica das amostras tumorais
+num_Tumor <- 1095
+
+# Criar a coluna indicando "Adjacente" e "tumor"
+normal_caso <- c(rep("Tumor", num_Tumor))
+
+# Criar o data.frame
+dadosamostras_t <- data.frame(Sample = amostras_de_tumor, Condition = normal_caso)
+
+
+```
+
+# CARACTERIZANDO AS AMOSTRAS DE TUMOR
+
+```{r}
+# colocando um terceira coluna que será trabalhada
+dadosamostras_t$case_id <- substr(dadosamostras_t$Sample, 1, 12)
+
+# transformado para poder utilizar vetor
+dadosamostras_t$case_id <- gsub("\\.", "-", dadosamostras_t$case_id)
+
+# pegando as minhas amostras utilizadas 
+clinica_pareada_t <- dadosamostras_t$case_id
+
+# filtragem dos individuos utilizados
+clinical_pareadas_t <- subset(clinical, clinical$case_submitter_id %in% clinica_pareada_t)
+
+# Remover duplicatas com base na coluna 'Y'
+clinical_pareadas_t <- clinical_pareadas_t[!duplicated(clinical_pareadas_t$case_submitter_id), ]
+
+# Obtendo a ordem desejada
+ordem_t <- match(dadosamostras_t$case_id, clinical_pareadas_t$case_submitter_id)
+
+# Reordenando clinical_pareadas
+clinical_pareadas_ordenado_t <- clinical_pareadas_t[ordem_t, ]
+
+# Juntando tudo
+infor_amostras_t <- cbind(dadosamostras_t, clinical_pareadas_ordenado_t)
+
+# verificando as informações de sexo
+unique(infor_amostras_t$gender) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações de etnicidade
+unique(infor_amostras_t$ethnicity) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações de cor
+unique(infor_amostras_t$race) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações de status vital
+unique(infor_amostras_t$vital_status) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações de metastase
+unique(infor_amostras_t$ajcc_pathologic_m) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações de linfonodos
+unique(infor_amostras_t$ajcc_pathologic_n) # vamos juntar informações
+
+# Substitua os termos "N1mi|N1a|N1b|N1c" por "N1"
+infor_amostras_t$ajcc_pathologic_n <- gsub("N1mi|N1a|N1b|N1c", "N1", infor_amostras_t$ajcc_pathologic_n)
+
+# Substitua os termos "N2a" por "N2"
+infor_amostras_t$ajcc_pathologic_n <- gsub("N2a", "N2", infor_amostras_t$ajcc_pathologic_n)
+
+# Substitua os termos "N3a|N3b|N3c" por "N2"
+infor_amostras_t$ajcc_pathologic_n <- gsub("N3a|N3b|N3c", "N3", infor_amostras_t$ajcc_pathologic_n)
+
+# Substitua os termos "N0 (mol+)", "N0 (i-)", "N0 (i+)" por "N0"
+# Substitua os padrões individualmente
+infor_amostras_t$ajcc_pathologic_n <- gsub("N0 \\(mol\\+\\)|N0 \\(i-\\)|N0 \\(i\\+\\)", "N0", infor_amostras_t$ajcc_pathologic_n)
+
+# Exiba o resultado
+unique(infor_amostras_t$ajcc_pathologic_n)
+
+# verificando as informações de Estágio Molecular
+unique(infor_amostras_t$ajcc_pathologic_stage) # vamos juntar informações
+
+# Substituindo os padrões "Stage IA" e "Stage IB" para "Stage_I"
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage IA", "Stage_I", infor_amostras_t$ajcc_pathologic_stage)
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage IB", "Stage_I", infor_amostras_t$ajcc_pathologic_stage)
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage I$", "Stage_I", infor_amostras_t$ajcc_pathologic_stage)
+
+# Substituindo os padrões "Stage IIA" e "Stage IIB" para "Stage_II"
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage IIA", "Stage_II", infor_amostras_t$ajcc_pathologic_stage)
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage IIB", "Stage_II", infor_amostras_t$ajcc_pathologic_stage)
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage II$", "Stage_II", infor_amostras_t$ajcc_pathologic_stage)
+
+# Substituindo os padrões "Stage IIIA", "Stage IIIB" e "Stage IIIC" para "Stage_III"
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage IIIA", "Stage_III", infor_amostras_t$ajcc_pathologic_stage)
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage IIIB", "Stage_III", infor_amostras_t$ajcc_pathologic_stage)
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage IIIC", "Stage_III", infor_amostras_t$ajcc_pathologic_stage)
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage III$", "Stage_III", infor_amostras_t$ajcc_pathologic_stage)
+
+# Substituindo o padrão "Stage IV" para "Stage_IV"
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage IV", "Stage_IV", infor_amostras_t$ajcc_pathologic_stage)
+
+# Substituindo qualquer padrão vazio ou não relatado para "Not_Reported"
+infor_amostras_t$ajcc_pathologic_stage <- gsub("Stage X|Not Reported|Not_Reported", "NA", infor_amostras_t$ajcc_pathologic_stage)
+
+# Verificando as informações de Estágio Molecular final
+print(unique(infor_amostras_t$ajcc_pathologic_stage))
+
+
+# verificando as informações de Estágio Molecular
+unique(infor_amostras_t$ajcc_pathologic_stage)
+
+# verificando as informações de Tamanho do Tumor
+unique(infor_amostras_t$ajcc_pathologic_t) # vamos juntar informações
+
+
+# Substitua os padrões individualmente "T1a|T1b|T1c"
+infor_amostras_t$ajcc_pathologic_t <- gsub("T1a|T1b|T1c", "T1", infor_amostras_t$ajcc_pathologic_t)
+
+unique(infor_amostras_t$ajcc_pathologic_t)
+
+infor_amostras_t$ajcc_pathologic_t <- gsub("T2a|T2b", "T2", infor_amostras_t$ajcc_pathologic_t)
+
+unique(infor_amostras_t$ajcc_pathologic_t)
+
+infor_amostras_t$ajcc_pathologic_t <- gsub("T3a", "T3", infor_amostras_t$ajcc_pathologic_t)
+
+unique(infor_amostras_t$ajcc_pathologic_t)
+
+infor_amostras_t$ajcc_pathologic_t <- gsub("T4b|T4d", "T4", infor_amostras_t$ajcc_pathologic_t)
+
+unique(infor_amostras_t$ajcc_pathologic_t)
+
+# verificando as informações do local de origem do câncer
+unique(infor_amostras_t$tissue_or_organ_of_origin) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# verificando as informações do tipo histologico do cancer
+unique(infor_amostras_t$primary_diagnosis) # não há nenhum NA aqui ou  informação que possamos juntar, podemos prosseguir
+
+# Substitua todos os valores '-- ' por NA em todo o dataframe
+infor_amostras_t[infor_amostras_t == "'--"] <- "Not_Reported"
+
+# Substitua todos os valores '-- ' por NA em todo o dataframe
+infor_amostras_t[infor_amostras_t == "Not_Reported"] <- "NA"
+
+# verificando termos
+unique(infor_amostras_t$SUBTYPE)
+
+# generalizando
+infor_amostras_t$SUBTYPE <- gsub("BRCA_LumA", "Luminal_A", infor_amostras_t$SUBTYPE)
+
+infor_amostras_t$SUBTYPE <- gsub("BRCA_LumB", "Luminal_B", infor_amostras_t$SUBTYPE)
+
+infor_amostras_t$SUBTYPE <- gsub("BRCA_Her2", "HER2", infor_amostras_t$SUBTYPE)
+
+infor_amostras_t$SUBTYPE <- gsub("BRCA_Normal|BRCA_Basal", "TNBC", infor_amostras_t$SUBTYPE)
+
+# Substitui os valores vazios por NA na coluna SUBTYPE
+infor_amostras_t$SUBTYPE[infor_amostras_t$SUBTYPE == ""] <- "NA"
+
+# Substituindo os valores NA por "Not_Reported"
+infor_amostras_t$SUBTYPE[is.na(infor_amostras_t$SUBTYPE)] <- "NA"
+
+# Substituindo os valores "Not_Reported" por NA
+infor_amostras_t$SUBTYPE[infor_amostras_t$SUBTYPE == "NA"] <- NA
+
+# Verificando os valores únicos após a substituição
+unique(infor_amostras_t$SUBTYPE)
+
+# refazendo tabela
+dadosamostras_2_t <- NULL
+
+dadosamostras_2_t$amostra <- infor_amostras_t$Sample
+
+dadosamostras_2_t$condicao <- infor_amostras_t$Condition
+
+dadosamostras_2_t$metastase <- infor_amostras_t$ajcc_pathologic_m
+
+dadosamostras_2_t$linfonodos <- infor_amostras_t$ajcc_pathologic_n
+
+dadosamostras_2_t$tamanho <- infor_amostras_t$ajcc_pathologic_t
+
+dadosamostras_2_t$estagio <- infor_amostras_t$ajcc_pathologic_stage
+
+dadosamostras_2_t$status <- infor_amostras_t$vital_status
+
+dadosamostras_2_t$molecular <- infor_amostras_t$SUBTYPE
+
+dadosamostras_2_t$sobrevida <- infor_amostras_t$days_to_last_follow_up
+
+dadosamostras_2_t$gender <- infor_amostras_t$gender
+
+dadosamostras_2_t <- as.data.frame(dadosamostras_2_t)
+
+# rápido PCA apenas de tumor
+teste_amostras <- NULL
+
+teste_amostras$amostra <- dadosamostras_2_t$amostra
+
+teste_amostras$molecular <- dadosamostras_2_t$molecular
+
+teste_amostras <- as.data.frame(teste_amostras)
+
+# Substituindo os valores NA por "Not_Reported"
+teste_amostras$molecular[is.na(teste_amostras$molecular)] <- "NA"
+
+brca_geral_protein <- counts_ger_BRCA_a[, c(-2,-3)]
+
+# Crie o DESeqDataSet e realize a expressao diferencial - DE TODAS AS PROTEÍNAS
+exp_tumor_brca <- DESeqDataSetFromMatrix(countData = brca_geral_protein,
+                                                 colData = teste_amostras,
+                                                 design = ~molecular, tidy = TRUE)
+
+dds_tumor_brca <- DESeq(exp_tumor_brca)
+
+# Filtrando genes com contagens muito baixas e poucos grupos de pessoas expressando
+# ao menos 20 pessoas expressando por grupo
+smallestGroupSize <- 20
+
+# filtrando
+keep <- rowSums(counts(dds_tumor_brca) >= 30) >= smallestGroupSize
+
+# repassando os resultados de filtragem
+dds_tumor_brca <- dds_tumor_brca[keep,]
+
+# contraste
+resultsNames(dds_tumor_brca)
+
+# conteúdo
+summary(dds_tumor_brca)
+
+# Pegando os dados normalizados
+vsd_PCA <- vst(dds_tumor_brca, blind=FALSE) 
+
+# Plotando o PCA - Só condição
+plot_m_tumor <- plotPCA(vsd_PCA, intgroup=c("molecular"))
+
+plot_m_tumor
+
+############## MITOCHONDRIAL
+brca_geral_protein_M <-  subset(counts_ger_BRCA_a, gene_name %in% genes_oxgl)
+
+
+brca_geral_protein_M <- brca_geral_protein_M[, c(-2,-3)]
+# Crie o DESeqDataSet e realize a expressao diferencial - DE TODAS AS PROTEÍNAS
+exp_tumor_brca <- DESeqDataSetFromMatrix(countData = brca_geral_protein_M,
+                                                 colData = teste_amostras,
+                                                 design = ~molecular, tidy = TRUE)
+
+dds_tumor_brca <- DESeq(exp_tumor_brca)
+
+# Filtrando genes com contagens muito baixas e poucos grupos de pessoas expressando
+# ao menos 20 pessoas expressando por grupo
+smallestGroupSize <- 20
+
+# filtrando
+keep <- rowSums(counts(dds_tumor_brca) >= 30) >= smallestGroupSize
+
+# repassando os resultados de filtragem
+dds_tumor_brca <- dds_tumor_brca[keep,]
+
+# contraste
+resultsNames(dds_tumor_brca)
+
+# conteúdo
+summary(dds_tumor_brca)
+
+# Pegando os dados normalizados
+vsd_PCA <- varianceStabilizingTransformation(dds_tumor_brca, blind=FALSE) 
+
+# Plotando o PCA - Só condição
+plot_m_tumor_MITO <- plotPCA(vsd_PCA, intgroup=c("molecular"))
+
+plot_m_tumor_MITO
+
+# fazendo um UMAP
+library(umap)
+library(ggplot2)
+library(dplyr)
+
+# Passo 2: Carregar os dados
+# Suponha que seus dados estejam em um arquivo CSV
+data <- brca_geral_protein
+
+data <- data[,-c(1)]
+
+# Passo 3: Substituir valores zero antes da transformação logarítmica
+# Adicionar uma pequena constante para evitar log(0)
+data[data == 0] <- 1
+data <- log2(data + 1e-9)
+
+# Transpor os dados para ter genes como colunas e amostras como linhas
+data_t <- t(data)
+
+# Passo 4: Executar o UMAP
+umap_result <- umap(data_t)
+
+# Passo 5: Visualizar os resultados
+teste_2001 <- dadosamostras_2_t
+
+teste_2001[teste_2001 == "NA"] <- NA
+
+# Criar um data frame com os resultados do UMAP e os labels
+umap_df <- data.frame(UMAP1 = umap_result$layout[,1], UMAP2 = umap_result$layout[,2], Label = teste_2001$molecular)
+
+# Filtrar NAs usando dplyr
+umap_df_filtered <- umap_df %>%
+  filter(!is.na(UMAP1) & !is.na(UMAP2) & !is.na(Label))
+
+# Plotar os resultados com cores personalizadas
+UMAP_BC_molecular <- ggplot(umap_df_filtered, aes(x = UMAP1, y = UMAP2, color = Label)) +
+  geom_point(size = 1.5) +
+  labs(title = "UMAP projection of gene expression data",
+       x = "UMAP1", y = "UMAP2") +
+  theme_minimal()
+
+UMAP_BC_molecular
+
+# Plotar os resultados com cores personalizadas (COM FACETAS)
+UMAP_BC_molecular_wrap <- ggplot(umap_df_filtered, aes(x = UMAP1, y = UMAP2, color = Label)) +
+  geom_point(size = 1.5) +
+  labs(title = "UMAP projection of gene expression data",
+       x = "UMAP1", y = "UMAP2") +
+  theme_minimal() +
+  facet_wrap(~ Label)
+
+UMAP_BC_molecular_wrap
+
+#### GENES DA FOSFORILAÇÃO OXIDATIVA E GLICOLÍSE UMAP
+# filtragem
+brca_counts_OXPHOS <- subset(counts_ger_BRCA, gene_name %in% genes_oxgl)
+
+# Passo 2: Carregar os dados
+# Suponha que seus dados estejam em um arquivo CSV
+data <- brca_counts_OXPHOS
+
+data <- data[,-c(1,2,3)]
+
+# Passo 3: Substituir valores zero antes da transformação logarítmica
+# Adicionar uma pequena constante para evitar log(0)
+data[data == 0] <- 1
+data <- log2(data + 1e-9)
+
+# Transpor os dados para ter genes como colunas e amostras como linhas
+data_t <- t(data)
+
+# Passo 4: Executar o UMAP
+umap_result <- umap(data_t)
+
+# Passo 5: Visualizar os resultados
+teste_2000 <- dadosamostras_2_t
+
+teste_2000[teste_2000 == "NA"] <- NA
+
+# Criar um data frame com os resultados do UMAP e os labels
+umap_df <- data.frame(UMAP1 = umap_result$layout[,1], UMAP2 = umap_result$layout[,2], Label = teste_2000$molecular)
+
+# Filtrar NAs usando dplyr
+umap_df_filtered <- umap_df %>%
+  filter(!is.na(UMAP1) & !is.na(UMAP2) & !is.na(Label))
+
+# Plotar os resultados com cores personalizadas
+UMAP_BC_molecular_mito <-  ggplot(umap_df_filtered, aes(x = UMAP1, y = UMAP2, color = Label)) +
+  geom_point(size = 1.5) +
+  labs(title = "UMAP projection of gene expression data",
+       x = "UMAP1", y = "UMAP2") +
+  theme_minimal()
+
+UMAP_BC_molecular_mito
+
+# Plotar os resultados com cores personalizadas (COM FACETAS)
+UMAP_BC_molecular_mito_wrap <- ggplot(umap_df_filtered, aes(x = UMAP1, y = UMAP2, color = Label)) +
+  geom_point(size = 1.5) +
+  labs(title = "UMAP projection of gene expression data",
+       x = "UMAP1", y = "UMAP2") +
+  theme_minimal() +
+  facet_wrap(~ Label)
+
+UMAP_BC_molecular_mito_wrap
+
+# Suponha que você tenha duas características para visualizar: Molecular_Subtype e Treatment
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[,1],
+  UMAP2 = umap_result$layout[,2],
+  Treatment = teste_2000$status,
+  Molecular_Subtype = teste_2000$molecular)
+
+umap_df_filtered <- umap_df %>%
+  filter(!is.na(UMAP1), !is.na(UMAP2), !is.na(Treatment), !is.na(Molecular_Subtype))
+
+# Criar uma coluna concatenada para múltiplas labels
+umap_df_filtered$Combined_Label <- paste(umap_df_filtered$Treatment, umap_df_filtered$Molecular_Subtype, sep = " - ")
+
+# Plotar os resultados com cores personalizadas para Molecular_Subtype e facetas para Treatment
+ggplot(umap_df_filtered, aes(x = UMAP1, y = UMAP2, color = Molecular_Subtype)) +
+  geom_point(size = 4) +
+  labs(title = "UMAP projection of gene expression data",
+       x = "UMAP1", y = "UMAP2",
+       color = "Molecular Subtype") +
+  theme_minimal() +
+  facet_wrap(~ Combined_Label)
+
+# Visualizar UMAP com facetas para Treatment
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(size = 1, aes(color = Molecular_Subtype)) +
+  theme_minimal() +
+  labs(title = "UMAP Visualization by Sample Type") +
+  facet_wrap(~ Molecular_Subtype) +
+  theme(
+  legend.title = element_text(size = 12),   # Tamanho do texto do título da legenda
+  legend.text = element_text(size = 12),    # Tamanho do texto das entradas da legenda
+  legend.key.size = unit(0.7, "cm")          # Tamanho das chaves da legenda
+)
+
+# GRIP DOS PCAs e UMAP
+cowplot::plot_grid(a_pca_113_normal, a_pca_982_s, a_pca_113_mito, a_pca_982_mito, plot_m_tumor, plot_m_tumor_MITO, UMAP_BC_molecular, UMAP_BC_molecular_mito, ncol=2, labels=LETTERS[1:8])
+
+```
+
+
+# comparação molecular
+
+```{r}
+library(tidyverse)
+library(ggExtra)
+library(ggstatsplot)
+
+gene_especifico <- NULL
+
+# comparação entre amostras tumorais e adjacentes
+# pegando gene por grupo
+gene_especifico$individuo <- dadosamostras_2_t$amostra
+
+gene_especifico$molecular_subtype <- dadosamostras_2_t$molecular
+
+gene_especifico$stage <- dadosamostras_2_t$estagio
+
+gene_especifico$gender <- dadosamostras_2_t$gender
+
+# Substituindo os valores "Not_Reported" por NA
+gene_especifico$gender[gene_especifico$gender == "Not_Reported"] <- NA
+
+gene_especifico$amostras <- row.names(para_plotar)
+
+# gene GPD1
+gene_especifico$GPD1 <- para_plotar[, c("GPD1")]
+
+# fazer listar virar data.frame
+gene_especifico <- as.data.frame(gene_especifico)
+
+# ajeitar condições
+gene_especifico$molecular_subtype <- as.factor(gene_especifico$molecular_subtype)
+
+# Substituindo os valores "Not_Reported" por NA
+gene_especifico$molecular_subtype[gene_especifico$molecular_subtype == "NA"] <- NA
+
+gene_especifico$stage <- as.factor(gene_especifico$stage)
+
+
+# ajeitar numeros e realizar primeira análise
+gene_especifico$GPD1 <- as.numeric(gene_especifico$GPD1)
+
+# para não haver infinitivos o numero zero deve ser mudado para 1
+# tirando zeros
+gene_especifico$GPD1[gene_especifico$GPD1 == 0] <- 1
+
+gene_especifico$GPD1log <- log2(gene_especifico$GPD1)
+
+GPD1_A <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = GPD1log,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+GPD1_A
+
+# gene COX7A1
+gene_especifico$COX7A1 <- para_plotar[, c("COX7A1")]
+
+# ajeitar
+gene_especifico$COX7A1 <- as.numeric(gene_especifico$COX7A1)
+
+gene_especifico$COX7A1log <- log2(gene_especifico$COX7A1)
+
+COX7A1_c <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = COX7A1log,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+COX7A1_c
+
+# gene COA6
+gene_especifico$COA6 <- para_plotar[, c("COA6")]
+
+# ajeitar
+gene_especifico$COA6 <- as.numeric(gene_especifico$COA6)
+
+gene_especifico$COA6log <- log2(gene_especifico$COA6)
+
+COA6_c <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = COA6log,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+COA6_c
+
+
+# gene NDUFAF6
+gene_especifico$NDUFAF6 <- para_plotar[, c("NDUFAF6")]
+
+# ajeitar
+gene_especifico$NDUFAF6 <- as.numeric(gene_especifico$NDUFAF6)
+
+gene_especifico$NDUFAF6log <- log2(gene_especifico$NDUFAF6)
+
+NDUFAF6_d <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = NDUFAF6log,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+NDUFAF6_d
+
+# gene TSTD1
+gene_especifico$TSTD1 <- para_plotar[, c("TSTD1")]
+
+# ajeitar
+gene_especifico$TSTD1 <- as.numeric(gene_especifico$TSTD1)
+
+gene_especifico$TSTD1[gene_especifico$TSTD1 == 0] <- 1
+
+gene_especifico$TSTD1log <- log2(gene_especifico$TSTD1)
+
+TSTD1_e <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = TSTD1log,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+TSTD1_e
+
+# gene DONSON
+gene_especifico$DONSON <- para_plotar[, c("DONSON")]
+
+# ajeitar
+gene_especifico$DONSON <- as.numeric(gene_especifico$DONSON)
+
+gene_especifico$DONSONlog <- log2(gene_especifico$DONSON)
+
+DONSON_d <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = DONSONlog,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+DONSON_d
+
+# gene COX6C
+gene_especifico$COX6C <- para_plotar[, c("COX6C")]
+
+# ajeitar
+gene_especifico$COX6C <- as.numeric(gene_especifico$COX6C)
+
+gene_especifico$COX6Clog <- log2(gene_especifico$COX6C)
+
+COX6C_b <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = COX6Clog,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+COX6C_b
+
+# gene C15orf48
+gene_especifico$C15orf48 <- para_plotar[, c("C15orf48")]
+
+# ajeitar
+gene_especifico$C15orf48 <- as.numeric(gene_especifico$C15orf48)
+
+gene_especifico$C15orf48log <- log2(gene_especifico$C15orf48)
+
+C15orf48_e <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = C15orf48log,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+C15orf48_e
+
+# extracting details from statistical tests
+extract_stats(C15orf48_e)
+
+
+# gene COX7B2
+gene_especifico$COX7B2 <- para_plotar[, c("COX7B2")]
+
+# ajeitar
+gene_especifico$COX7B2 <- as.numeric(gene_especifico$COX7B2)
+
+gene_especifico$COX7B2[gene_especifico$COX7B2 == 0] <- 1
+
+gene_especifico$COX7B2Clog <- log2(gene_especifico$COX7B2)
+
+plt <- ggbetweenstats(
+  data = gene_especifico,
+  x = gender,
+  y = COX7B2Clog,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+plt
+
+plt <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = COX7B2,
+  type = "np",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+plt
+
+# Cria o gráfico
+ggplot(gene_especifico, aes(x = molecular_subtype, y = COX7B2Clog, color = stage)) +
+  geom_boxplot(outlier.shape = NA) +  # Adiciona o boxplot sem outliers
+  geom_jitter(position = position_jitter(width = 0.2), size = 2, alpha = 0.7) +  # Adiciona os pontos com jitter
+  labs(title = "Expressão de COX7B2 por Subtipo Molecular e Estágio",
+       x = "Subtipo Molecular",
+       y = "Expressão de COX7B2") +
+  theme_minimal()
+# Define o tema minimalista
+
+# gene PCK1
+gene_especifico$PCK1 <- para_plotar[, c("PCK1")]
+
+# ajeitar
+gene_especifico$PCK1 <- as.numeric(gene_especifico$PCK1)
+
+gene_especifico$PCK1[gene_especifico$PCK1 == 0] <- 1
+
+gene_especifico$PCK1log <- log2(gene_especifico$PCK1)
+
+PCK1_g <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = PCK1log,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+PCK1_g
+
+# gene SLC2A4
+gene_especifico$SLC2A4 <- para_plotar[, c("SLC2A4")]
+
+# ajeitar
+gene_especifico$SLC2A4 <- as.numeric(gene_especifico$SLC2A4)
+
+gene_especifico$SLC2A4log <- log2(gene_especifico$SLC2A4)
+
+SLC2A4_i <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = SLC2A4log,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+SLC2A4_i
+
+# gene ALDOC
+gene_especifico$ALDOC <- para_plotar[, c("ALDOC")]
+
+# ajeitar
+gene_especifico$ALDOC <- as.numeric(gene_especifico$ALDOC)
+
+gene_especifico$ALDOClog <- log2(gene_especifico$ALDOC)
+
+ALDOC_l <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = ALDOClog,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+ALDOC_l
+
+# gene PC
+gene_especifico$PC <- para_plotar[, c("PC")]
+
+# ajeitar
+gene_especifico$PC <- as.numeric(gene_especifico$PC)
+
+gene_especifico$PClog <- log2(gene_especifico$PC)
+
+PC_m <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = PClog,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+PC_m
+
+# gene ALDOA
+gene_especifico$ALDOA <- para_plotar[, c("ALDOA")]
+
+# ajeitar
+gene_especifico$ALDOA <- as.numeric(gene_especifico$ALDOA)
+
+gene_especifico$ALDOAlog <- log2(gene_especifico$ALDOA)
+
+ALDOA_k <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = ALDOAlog,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+ALDOA_k
+
+# gene SLC2A1
+gene_especifico$SLC2A1 <- para_plotar[, c("SLC2A1")]
+
+# ajeitar
+gene_especifico$SLC2A1 <- as.numeric(gene_especifico$SLC2A1)
+
+gene_especifico$SLC2A1log <- log2(gene_especifico$SLC2A1)
+
+SLC2A1_f <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = SLC2A1log,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+SLC2A1_f
+
+
+
+# gene ENO2
+gene_especifico$ENO2 <- para_plotar[, c("ENO2")]
+
+# ajeitar
+gene_especifico$ENO2 <- as.numeric(gene_especifico$ENO2)
+
+gene_especifico$ENO2log <- log2(gene_especifico$ENO2)
+
+ENO2_h <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = ENO2log,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE)
+
+
+ENO2_h
+
+
+# gene PGK1
+gene_especifico$PGK1 <- para_plotar[, c("PGK1")]
+
+# ajeitar
+gene_especifico$PGK1 <- as.numeric(gene_especifico$PGK1)
+
+gene_especifico$PGK1log <- log2(gene_especifico$PGK1)
+
+PGK1_j <- ggbetweenstats(
+  data = gene_especifico,
+  x = molecular_subtype,
+  y = PGK1log,
+  type = "p",
+  plot.type = "box",
+  conf.level = 0.99,
+  xlab = "Molecular Subtypes in our Cohoort",
+  ylab = "Normalized Counts in Log2",
+  pairwise.comparisons = TRUE,
+  p.adjust.method = "BH",
+  pairwise.display = "significant",
+  outlier.tagging = FALSE,
+  outlier.label = Run,
+  nboot = 10,
+  ggtheme = ggplot2::theme_grey(),
+  ggstatsplot.layer = FALSE,
+  )
+
+
+PGK1_j
+
+
+
+
+cowplot::plot_grid(SLC2A4_i, PCK1_g, SLC2A1_f,ENO2_h, GPD1_A, COX7A1_c, C15orf48_e, COX6C_b, ncol=4, labels=LETTERS[1:8])
+```
+
+
+# ENRIQUECIMENTO GERAL
+
+#### Pegando o gene list da expressao diferencial entre 113 adjacente e 982 tumor
+
+```{r}
+# pacotes a serem utilizados
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(tidyverse)
+
+
+# para não ocorrer problemas
+df_unico <- res_mestrado_brca_982 %>% distinct(entrez_id, .keep_all = TRUE)
+
+# pegar o log2foldchange dos genes
+genelist982 <- df_unico[, 2]
+# No caso aqui eu selecionei a segunda coluna, isto é, peguei o número log2forchange 
+
+#Agora eu vou aderir ao meu resultado do log2forchange a minha lista de genes presentes na primeira coluna sem heading, ou seja, utilizo os rownames
+names(genelist982) <- df_unico[, 7] %>% as.character()
+
+#agora selecionamos do maior para o menor a partir do log2forchange
+genelist982 = sort(genelist982, decreasing = TRUE)
+genelist982
+plot(genelist982)
+
+teste_11 <- df_unico[,c(6,2)]
+
+write.table(teste_11, "teste_11.csv", quote = F, col.names = F, row.names = F, sep = ",")
+```
+
+
+# Realizando enriquecimento e plotagem com base no Gene Ontology (GSEA - GO)
+
+```{r}
+
+### GENE ONTOLOGY - GSEA ##### - MESTRADO OXPHOS GLICO E CANCER DE MAMA
+#BP
+mestrado_bp_go_982 <- gseGO(genelist982,
+              OrgDb        = org.Hs.eg.db,
+              ont          = "BP",
+              pvalueCutoff = 0.05,
+              pAdjustMethod = "BH",
+              verbose      = FALSE) 
+
+# pegando os resultados
+results_bp_go_982 <- mestrado_bp_go_982@result
+
+# salvando os resultados
+write.table(results_bp_go_982, "8922_enrich_go_bp.txt", quote = F, col.names = T, row.names = F, sep = "\t")
+
+#ALL
+mestrado_all_go_982 <- gseGO(genelist982,
+              OrgDb        = org.Hs.eg.db,
+              ont          = "all",
+              pvalueCutoff = 0.05,
+              pAdjustMethod = "BH",
+              verbose      = FALSE)
+
+results_go_all_982 <- mestrado_all_go_982@result
+
+write.table(results_go_all_982, "8922_enrich_go_all.txt", quote = F, col.names = T, row.names = F, sep = "\t")
+
+
+
+```
+
+
+#### Agora em relação aos resultados do GO irei comparar com o enriquecimento feito também com base no grupo de mesmos individuos 
+
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+
+# Example data frames for enrichment results
+# Replace these with your actual data frames
+enrichment_1 <- data.frame(
+  Description = results_rapido_go_bp$Description,
+  NES = results_rapido_go_bp$NES)
+
+enrichment_2 <- data.frame(
+  Description = results_bp_go_982$Description,
+  NES = results_bp_go_982$NES)
+
+# Find common pathways
+common_pathways <- inner_join(enrichment_1, enrichment_2, by = "Description", suffix = c("_Enrichment1", "_Enrichment2"))
+
+# Filter to keep only the 20 most comparable pathways based on NES difference
+common_pathways <- common_pathways %>%
+  mutate(NES_diff = abs(NES_Enrichment1 - NES_Enrichment2)) %>%
+  arrange(NES_diff) %>%
+  head(20)
+
+# Create a data frame for plotting
+data_plot <- common_pathways %>%
+  select(Description, NES_Enrichment1, NES_Enrichment2) %>%
+  pivot_longer(cols = starts_with("NES"), names_to = "Enrichment", values_to = "NES")
+
+# Create the horizontal bar plot
+GO_common <- ggplot(data_plot, aes(x = Description, y = NES, fill = Enrichment)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") + # Add a horizontal line at y=0
+  labs(title = "Common Pathways in Gene Ontology",
+       x = "Pathways",
+       y = "Normalized Enrichment Score (NES)") +
+  scale_fill_manual(values = c("NES_Enrichment1" = "lightblue", "NES_Enrichment2" = "orchid"),  labels = c("NES_Enrichment1" = "113 - Group", "NES_Enrichment2" = "982 - Group")) +
+  theme_minimal() +
+  coord_flip() +  # Flip the coordinates for horizontal bars
+  theme(axis.text.y = element_text(angle = 0, hjust = 1)) +
+  theme(plot.title = element_text(hjust = 0.5)) # Adjust y-axis text for better visibility
+
+# Show the plot
+
+GO_common
+
+
+
+```
+
+
+
+### Agora realiando o enriquecimento com base no banco de dados KEGG (GSEA - KEGG)
+
+```{r}
+## KEGG - GSEA - MESTRADO OXPHOS GLICO E CANCER DE MAMA
+
+kkegg_breast_982 <- gseKEGG(
+  genelist982,
+  organism = "hsa",
+  keyType = "ncbi-geneid",
+  exponent = 1,
+  eps = 1e-10,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  verbose = TRUE,
+  use_internal_data = FALSE,
+  seed = FALSE,
+  by = "fgsea")
+
+results_982_kegg_all <- kkegg_breast_982@result
+
+write.table(results_982_kegg_all, "8922_enrich_kegg_all.txt", quote = F, col.names = T, row.names = F, sep = "\t")
+
+
+mkk22 <- gseMKEGG(geneList = genelist982,
+                 organism = 'hsa',
+                 pvalueCutoff = 1)
+
+resultsmkk22 <- mkk22@result
+
+
+### realizando grafico
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+
+# Example data frames for enrichment results
+# Replace these with your actual data frames
+enrichment_1 <- data.frame(
+  Description = results_rapido_kegg_all$Description,
+  NES = results_rapido_kegg_all$NES)
+
+enrichment_2 <- data.frame(
+  Description = results_982_kegg_all$Description,
+  NES = results_982_kegg_all$NES)
+
+# Find common pathways
+common_pathways <- inner_join(enrichment_1, enrichment_2, by = "Description", suffix = c("_Enrichment1", "_Enrichment2"))
+
+# Filter to keep only the 20 most comparable pathways based on NES difference
+common_pathways <- common_pathways %>%
+  mutate(NES_diff = abs(NES_Enrichment1 - NES_Enrichment2)) %>%
+  arrange(NES_diff) %>%
+  head(20)
+
+# Create a data frame for plotting
+data_plot <- common_pathways %>%
+  select(Description, NES_Enrichment1, NES_Enrichment2) %>%
+  pivot_longer(cols = starts_with("NES"), names_to = "Enrichment", values_to = "NES")
+
+# Create the horizontal bar plot
+KEGG_common <- ggplot(data_plot, aes(x = Description, y = NES, fill = Enrichment)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") + # Add a horizontal line at y=0
+  labs(title = "Common Pathways in KEGG",
+       x = "Pathways",
+       y = "Normalized Enrichment Score (NES)") +
+  scale_fill_manual(values = c("NES_Enrichment1" = "lightblue", "NES_Enrichment2" = "orchid"),  labels = c("NES_Enrichment1" = "113 - Group", "NES_Enrichment2" = "982 - Group")) +
+  theme_minimal() +
+  coord_flip() +  # Flip the coordinates for horizontal bars
+  theme(axis.text.y = element_text(angle = 0, hjust = 1))  +
+  theme(plot.title = element_text(hjust = 0.5))
+
+KEGG_common
+
+```
+
+### Agora realiando o enriquecimento com base no banco de dados REACTOME (GSEA - REACTOME)
+
+```{r}
+## REACTOME - MESTRADO OXPHOS GLICO E CANCER DE MAMA
+#if (!require("BiocManager", quietly = TRUE))
+#  install.packages("BiocManager")
+
+
+#BiocManager::install("ReactomePA")
+
+library(ReactomePA)
+
+yy_982 <- ReactomePA::gsePathway(
+ genelist982,
+ organism = "human",
+ exponent = 1,
+ eps = 1e-10,
+ pvalueCutoff = 0.05,
+ pAdjustMethod = "BH",
+ verbose = TRUE,
+ seed = FALSE,
+ by = "fgsea")
+
+results_982_reactome <- yy_982@result
+
+write.table(results_982_reactome, "8922_enrich_reactome_all.txt", quote = F, col.names = T, row.names = F, sep = "\t")
+
+
+### Gráfico de em comum
+### realizando grafico
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+
+# Example data frames for enrichment results
+# Replace these with your actual data frames
+enrichment_1 <- data.frame(
+  Description = results_rapido_reactome$Description,
+  NES = results_rapido_reactome$NES)
+
+enrichment_2 <- data.frame(
+  Description = results_982_reactome$Description,
+  NES = results_982_reactome$NES)
+
+# Find common pathways
+common_pathways <- inner_join(enrichment_1, enrichment_2, by = "Description", suffix = c("_Enrichment1", "_Enrichment2"))
+
+# Filter to keep only the 20 most comparable pathways based on NES difference
+common_pathways <- common_pathways %>%
+  mutate(NES_diff = abs(NES_Enrichment1 - NES_Enrichment2)) %>%
+  arrange(NES_diff) %>%
+  head(20)
+
+# Create a data frame for plotting
+data_plot <- common_pathways %>%
+  select(Description, NES_Enrichment1, NES_Enrichment2) %>%
+  pivot_longer(cols = starts_with("NES"), names_to = "Enrichment", values_to = "NES")
+
+# Create the horizontal bar plot
+Reactome_common <- ggplot(data_plot, aes(x = Description, y = NES, fill = Enrichment)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") + # Add a horizontal line at y=0
+  labs(title = "Common Pathways in Reactome",
+       x = "Pathways",
+       y = "Normalized Enrichment Score (NES)") +
+  scale_fill_manual(values = c("NES_Enrichment1" = "lightblue", "NES_Enrichment2" = "orchid"), labels = c("NES_Enrichment1" = "113 - Group", "NES_Enrichment2" = "982 - Group")) +
+  theme_minimal() +
+  coord_flip() +  # Flip the coordinates for horizontal bars
+  theme(axis.text.y = element_text(angle = 0, hjust = 1))  +
+  theme(plot.title = element_text(hjust = 0.5))
+
+Reactome_common
+
+cowplot::plot_grid(GO_common, KEGG_common, Reactome_common, ncol=2, labels=LETTERS[1:3])
+
+```
+
+
+# COMPARAÇÃO POR TERMOS
+
+#### Observação geral: Vou generalizar o termo 'Mitochondrial complex I: NADH:ubiquinone oxidoreductase subunits' para todos os genes da fosforilação oxidativa (os 167 genes). E vou generalizar os termos Enolases (do grupo de genes ENOS) para todos os da Glicolise (38  genes), é apenas para testagem!
+
+```{r}
+# pacotes necessários
+library(tidyverse)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(pheatmap)
+library(clusterProfiler)
+library(DOSE)
+library(ggnewscale)
+library(enrichplot)
+library(GOSemSim)
+library(ReactomePA)
+library(MeSHDbi)
+library(meshes)
+library(DT)
+
+# teste 
+teste <- res_mestrado_brca_982 # arquivo para poder realizar as modificações se necessário
+
+# utilizei o hgnc2family para verificar os arquivos
+hgnc2family <- read.delim("C:/Users/ricar/Documents/Mestrado_Rstudio_org/hgnc_complete_set.txt")
+
+# vou substituir para verificar os genes da fosforilação oxidativa e glicolise como um todo. Generalização de termos
+
+# Substitua os valores na coluna
+#hgnc2family$gene_group <- ifelse(hgnc2family$entrez_id %in% genes_oxphos, 'Mitochondrial complex I: NADH:ubiquinone oxidoreductase subunits', hgnc2family$gene_group)
+
+# Substitua os valores na coluna
+#hgnc2family$gene_group <- ifelse(hgnc2family$entrez_id %in% genes_glico, 'Enolases', hgnc2family$gene_group)
+
+# pegando gene por grupo
+gene2family <- hgnc2family[, c("gene_group","entrez_id")]
+
+# pegando apenas os genes da nossa contagem
+cluster_genes <- list(gene=as.character(unlist(teste$entrez_id)))
+
+# realizando enriquecimento
+resultado_aqui <- clusterProfiler::enricher(cluster_genes$gene, TERM2GENE = gene2family, pvalueCutoff = 0.05, pAdjustMethod="BH")
+
+write.table(resultado_aqui, "982_enrich_hgnc2family.txt", quote = F, col.names = T, row.names = F, sep = "\t")
+
+DT::datatable(as.data.frame(resultado_aqui))
+
+# gsea msig - pesquisar
+
+
+```
+
+### Enrichment Analysis
+
+### Compare Clusters
+
+
+```{r enrich mrna}
+
+hgk <- compareCluster(geneCluster = cluster_genes, fun = enricher,  pvalueCutoff=0.01, pAdjustMethod="BH", TERM2GENE = gene2family)
+hgk <- setReadable(hgk, OrgDb = org.Hs.eg.db, keyType="ENTREZID")
+
+
+hgk_982_d <- data.frame(hgk)
+
+
+# Load necessary libraries
+library(ggplot2)
+
+# Assuming you already have the ORA enrichment results in data frames
+# results1 and results2
+# Replace these with your actual results data frames
+results1 <- as.data.frame(hgk_113_d)  # Replace with your actual data
+results2 <- as.data.frame(hgk_982_d)  # Replace with your actual data
+
+# Identify all common terms between the two datasets
+common_terms <- intersect(results1$Description, results2$Description)
+
+# Filter results to keep only common terms
+common_results1 <- results1[results1$Description %in% common_terms, ]
+common_results2 <- results2[results2$Description %in% common_terms, ]
+
+# Combine the results into a single data frame and add a source column
+common_results1$Source <- "HGNC - 113"
+common_results2$Source <- "HGNC - 982"
+combined_results <- rbind(common_results1, common_results2)
+
+# Order the combined results by adjusted p-value and select the top 20
+top_combined_results <- combined_results %>%
+  group_by(Description) %>%        # Agrupar por termo
+  summarize(p.adjust = mean(p.adjust), .groups = 'drop') %>%  # Calcular a média dos p-valores ajustados
+  arrange(p.adjust) %>%     # Ordenar por p ajustado em ordem crescente
+  head(20)                  # Selecionar os 20 primeiros termos
+
+# Filter to include only the top terms from both datasets
+final_results <- combined_results %>%
+  filter(Description %in% top_combined_results$Description)
+
+# Plot usando ggplot2
+hgnc_common <- ggplot(final_results, aes(x = reorder(Description, p.adjust), y = -log10(p.adjust), fill = Source)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  theme_minimal() +
+  scale_fill_manual(values = c("HGNC - 113" = "lightblue", "HGNC - 982" = "orchid")) +
+  labs(title = "Comparison of Common in HGNC - Cluster Terms",
+       x = "Pathway",
+       y = "-log10(p-value adjust)") +
+  theme(legend.position = "top") +
+  theme(plot.title = element_text(hjust = 5))
+  
+  
+
+hgnc_common
+
+cowplot::plot_grid(GO_common, KEGG_common, Reactome_common, hgnc_common, ncol=2, labels=LETTERS[1:4])
+
+```
+
+### HGNC Gene Family Dot Plot
+
+```{r HGNC dotplot, fig.height = 12, fig.width = 8, fig.align = "center"}
+
+dotplot(hgk, showCategory = 30, label_format = 50, font.size = 7)
+
+
+```
+
+### Gene Network Gene Families Modules
+
+```{r, fig.height = 8, fig.width = 12, fig.align = "center"}
+
+cnetplot(hgk)
+
+```
+
+### Enrichment Map Gene families Modules
+
+```{r, fig.height = 8, fig.width = 12, fig.align = "center"}
+
+pairwise_hgk_enrich <- pairwise_termsim(hgk)
+emapplot(pairwise_hgk_enrich)
+
+```
+
+# Comparação de Clusteres
+
+```{r}
+
+# formação da tabela
+mydf <- NULL
+mydf <- data.frame(Entrez= res_mestrado_brca_982$entrez_id, FC=res_mestrado_brca_982$log2FoldChange)
+mydf <- mydf[abs(mydf$FC) > 1,]
+mydf$group <- "upregulated"
+mydf$group[mydf$FC < 0] <- "downregulated"
+mydf$othergroup <- "A"
+mydf$othergroup[abs(mydf$FC) > 2] <- "B"
+
+# enriquecimento em grupos de hipo e hiper expressos
+formula_res <- compareCluster(Entrez~group+othergroup, data=mydf, fun="enrichPathway")
+
+# plot base
+dotplot(formula_res)
+
+# plot diferenciado
+dotplot(formula_res, x="group") + facet_grid(~othergroup)
+
+# plot base
+dotplot(formula_res)
+
+```
+
+
+### A partir de agora, após concluirmos as análises comparativas entre os genes e as análises de expressão diferencial, iremos realizar a comparação dos enriquecimentos. Para isso, selecionamos dois bancos de dados que são mais adequados para identificar nossas vias-alvo: "Glycolysis" e "Oxidative Phosphorylation". Os bancos de dados escolhidos para essa etapa são o MSigDB e o KEGG, que são amplamente reconhecidos pela sua precisão em indicar os principais caminhos metabólicos envolvidos.
+
+
+# GENEKITR
+
+
+```{r}
+# Carregando bibliotecas necessárias
+library(geneset)
+library(genekitr)
+
+# Passo 2: Preparação do conjunto de genes (gene set)
+# Baixando o conjunto de genes do MSigDB (categoria Hallmark)
+gs <- geneset::getMsigdb(org = "human", category = 'H')
+
+# Passo 3: Realizando a análise GSEA
+# Executando a análise GSEA com a lista de genes 'genelist982' e o conjunto de genes baixado 'gs'
+gse <- genGSEA(genelist = genelist982, geneset = gs)
+
+# Análise: Especificando as vias e genes de interesse
+# Definindo as vias-alvo para visualização: Glicólise e Fosforilação Oxidativa
+pathways <- c("HALLMARK_GLYCOLYSIS", "HALLMARK_OXIDATIVE_PHOSPHORYLATION")
+# Definindo os genes de interesse que serão destacados no gráfico
+genes <- c("SLC2A1", "GPD1", "COX6C", "C15orf48")
+
+# Plotando o gráfico GSEA clássico
+# Visualizando as vias especificadas com os genes destacados
+plotGSEA(gse, plot_type = "classic", show_pathway = pathways, show_gene = genes)
+
+# Carregando o pacote patchwork para combinar gráficos
+library(patchwork)
+
+# Gerando gráficos GSEA no formato 'fgsea'
+# 'p1' exibe a 5ª via mais significativa da análise
+p1 <- plotGSEA(gse, plot_type = "fgsea", show_pathway = 5)
+# 'p2' exibe as vias específicas de Glicólise e Fosforilação Oxidativa
+p2 <- plotGSEA(gse, plot_type = "fgsea", show_pathway = pathways)
+
+# Combinando os gráficos gerados em um layout lado a lado e adicionando anotações
+p1 + p2 + plot_annotation(tag_levels = "A")
+
+```
+
+
+## Fazendo GSEA agora com base no MSigDB 
+
+
+```{r}
+# Carregando bibliotecas necessárias
+library(msigdbr)
+library(dplyr)
+library(enrichplot)
+
+# Enriquecimento com o MSigDBR (base de assinaturas moleculares)
+# Baixando todas as vias biológicas (gene sets) disponíveis para Homo sapiens
+m_df <- msigdbr(species = "Homo sapiens")
+
+# vendo os tipos de vias presentes
+unique(m_df$gs_cat)
+
+unique(m_df$gs_subcat)
+
+# Visualizando as primeiras duas linhas do dataframe de vias para inspeção
+head(m_df, 2) %>% as.data.frame
+
+# Selecionando os conjuntos de genes específicos da categoria Hallmark (H)
+# E extraindo os nomes dos conjuntos de genes (gs_name) e os IDs dos genes (entrez_gene)
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, entrez_gene)
+
+# Visualizando as primeiras linhas do dataframe contendo os conjuntos de genes e IDs Entrez
+head(m_t2g)
+
+# Realizando a análise GSEA (Gene Set Enrichment Analysis)
+# Usando a lista de genes 'genelist982' e o conjunto de genes especificado 'm_t2g'
+# O valor de corte do p-valor é definido como 0.01 para significância
+em2 <- GSEA(genelist982, TERM2GENE = m_t2g, pvalueCutoff = 1)
+
+# Visualizando as primeiras linhas dos resultados da análise GSEA
+head(em2)
+
+# Plotando o gráfico GSEA para os caminhos especificados em 'pathways'
+pathways <- c("HALLMARK_GLYCOLYSIS", "HALLMARK_OXIDATIVE_PHOSPHORYLATION")
+
+# Incluindo a tabela de p-valores, com cores personalizadas para as curvas de enriquecimento
+gseaplot2(em2, geneSetID = pathways, pvalue_table = TRUE,
+          color = c("#E495A5", "#86B875"), ES_geom = "line")
+
+# Visualizando as publicações relacionadas às vias de interesse usando o pacote 'enrichplot'
+# Gerando um gráfico PMC para as vias entre 2010 e 2020, plotando a proporção de publicações por ano
+p <- pmcplot(pathways, 2010:2020)
+
+# Gerando um segundo gráfico PMC sem mostrar a proporção, apenas o número total de publicações
+p2 <- pmcplot(pathways, 2010:2020, proportion = FALSE)
+
+# Combinando os dois gráficos PMC em um layout lado a lado com duas colunas
+plot_grid(p, p2, ncol = 2)
+
+
+```
+
+# Enriquecimento Mitocondrial
+
+
+```{r}
+# Inspecionando os dados de genes e vias mitocondriais
+# Aqui, estamos visualizando as primeiras linhas do dataframe 'human_gene_function'
+# que contém os processos mitocondriais e os IDs dos genes (NCBI_GeneID).
+head(human_gene_function)
+
+# Criando o tibble para o enriquecimento mitocondrial
+# Estamos mapeando os processos mitocondriais ('mito_process') aos IDs dos genes ('NCBI_GeneID')
+# para realizar a análise GSEA. O 'tibble' é um formato simplificado de dataframe no R.
+meu_tibble <- tibble(
+  gs_name = human_gene_function$mito_process,  # Nome dos processos mitocondriais
+  entrez_id = human_gene_function$NCBI_GeneID  # IDs Entrez dos genes
+)
+
+# Visualizando o tibble
+# Após criar o 'tibble', imprimimos para garantir que ele está correto
+print(meu_tibble)
+
+# Realizando a análise GSEA para os processos mitocondriais
+# A função 'GSEA' compara a lista de genes de expressão ('genelist982') com os processos mitocondriais
+# mapeados em 'meu_tibble'. O 'pvalueCutoff = 1' indica que estamos mantendo todos os resultados.
+mito_gsea <- GSEA(genelist982, TERM2GENE = meu_tibble, pvalueCutoff = 1)
+
+# Definindo as vias de interesse
+# Aqui, especificamos as vias biológicas que desejamos visualizar no gráfico, 
+# que são "Glycolysis" e "Oxidative Phosphorylation".
+pathways_m <- c("Glycolysis", "Oxidative Phosphorylation")
+
+# Gerando o gráfico GSEA para as vias especificadas
+# Utilizamos a função 'gseaplot2' para plotar os resultados da análise GSEA.
+# O parâmetro 'geneSetID = pathways_m' especifica as vias que estamos interessados em visualizar.
+# Incluímos a tabela de p-valores no gráfico e personalizamos as cores das curvas com o parâmetro 'color'.
+gseaplot2(mito_gsea, geneSetID = pathways_m, pvalue_table = TRUE,
+          color = c("#E495A5", "#86B875"), ES_geom = "line")
+
+
+```
+
+
+# Realizando o DGSEA - utilizando o banco de dados MsigDB
+
+
+```{r}
+# bibliotecas
+library(RCurl)
+library(GSA)
+library(DGSEA)
+library(tidyverse)
+library(data.table)
+
+# Carregando o arquivo GMT
+# O arquivo GMT contém conjuntos de genes organizados em uma matriz transposta, com colunas representando diferentes conjuntos de genes.
+# Aqui estamos utilizando a função fread para ler o arquivo GMT. O argumento 'fill=TRUE' garante que linhas com menos colunas não causem erro,
+# e 'header = F' indica que o arquivo não tem cabeçalho.
+gmt_data <- fread("C:/Users/ricar/Downloads/h.all.v2024.1.Hs.symbols.gmt", fill=TRUE, header = F)
+
+# Criando uma lista
+# 'split' divide os dados do GMT em uma lista, agrupando os genes com base no nome do conjunto de genes (armazenado na coluna V1).
+# A função 'split' usa a primeira coluna (V1) como chave e agrupa o restante dos valores como listas de genes.
+gene_sets_list <- split(gmt_data[, -c(1, 2), with = FALSE], gmt_data$V1)
+
+# Limpando a lista
+# Convertemos os dados de data.table para vetores de caracteres, removendo elementos vazios ou NAs.
+# Isso é feito para garantir que cada entrada da lista seja um vetor contendo apenas os nomes dos genes do conjunto correspondente.
+gene_sets_list <- lapply(gene_sets_list, function(x) unlist(x))
+
+# Extraindo os nomes dos conjuntos de genes e descrições
+# 'V1' contém os nomes dos conjuntos de genes, e 'V2' contém as descrições dos conjuntos.
+gene_set_names <- gmt_data$V1
+gene_set_descriptions <- gmt_data$V2
+
+# Criando a estrutura final
+# Aqui criamos uma lista final chamada 'msigdb_pathways' que possui três componentes: os conjuntos de genes ('genesets'),
+# os nomes dos conjuntos de genes ('geneset.names') e as descrições dos conjuntos de genes ('geneset.descriptions').
+msigdb_pathways <- list(
+  genesets = gene_sets_list,  # Lista contendo os conjuntos de genes
+  geneset.names = gene_set_names,  # Vetor contendo os nomes dos conjuntos de genes
+  geneset.descriptions = gene_set_descriptions  # Vetor contendo as descrições dos conjuntos de genes
+)
+
+# Atribuindo a classe "GSA.genesets"
+# Estamos definindo a classe da lista 'msigdb_pathways' como 'GSA.genesets', o que facilita o uso dessa estrutura em funções relacionadas à análise GSA.
+class(msigdb_pathways) <- "GSA.genesets"
+
+
+# Pegando as listas
+set.names <- msigdb_pathways$geneset.names
+
+# Realizando as análises para os dados de câncer de mama
+
+# Separar as amostras de tecido adjacente e tecido tumoral primário
+# As amostras de tecido adjacente estão nas colunas 4 a 116 do objeto 'brca_rna_bind'
+# As amostras de tecido tumoral primário estão nas colunas 117 a 1098
+adjacent_samples <- brca_rna_bind[, 4:116]
+tumor_samples <- brca_rna_bind[, 117:1098]
+
+# Substituindo valores zero por 1
+# Isso evita problemas ao calcular o log2, já que o log de 0 é indefinido
+adjacent_samples[adjacent_samples == 0] <- 1
+tumor_samples[tumor_samples == 0] <- 1
+
+# Calcular a média de expressão gênica em cada grupo
+# 'rowMeans' calcula a média da expressão de cada gene nas amostras adjacentes e tumorais
+mean_adjacent <- rowMeans(adjacent_samples)
+mean_tumor <- rowMeans(tumor_samples)
+
+# Criando uma lista com a média da expressão gênica log2 para tecido adjacente de mama
+adjacente_dgsea <- NULL  # Inicializa a lista 'adjacente_dgsea'
+
+# Armazenando os nomes dos genes na coluna 'Gene'
+adjacente_dgsea$Gene <- brca_rna_bind$gene_name
+
+# Calculando a diferença de expressão log2 entre tecido adjacente e tumoral
+# Aqui estamos aplicando a transformação logarítmica log2 e subtraindo as médias de expressão entre os grupos
+adjacente_dgsea$expression_log2 <- log2(mean_adjacent + 1) - log2(mean_tumor + 1) #(grupo de referência)
+
+# Convertendo a lista 'adjacente_dgsea' para um data frame
+adjacente_dgsea <- as.data.frame(adjacente_dgsea)
+
+# Visualizando as primeiras 5 linhas do dataframe resultante
+head(adjacente_dgsea, 5)
+
+# Ordenando os genes pela expressão diferencial log2 de forma decrescente
+adjacente_dgsea <- adjacente_dgsea %>%
+  arrange(desc(expression_log2))
+
+# Repetindo o processo para o tecido tumoral
+# Criando uma lista com a média da expressão gênica log2 para tecido tumoral de mama
+tumor_dgsea <- NULL  # Inicializa a lista 'tumor_dgsea'
+
+# Armazenando os nomes dos genes na coluna 'Gene'
+tumor_dgsea$Gene <- brca_rna_bind$gene_name
+
+# Calculando a diferença de expressão log2 entre tecido tumoral e adjacente
+tumor_dgsea$expression_log2 <- log2(mean_tumor + 1) - log2(mean_adjacent + 1) # (grupo de referência)
+
+# Convertendo a lista 'tumor_dgsea' para um data frame
+tumor_dgsea <- as.data.frame(tumor_dgsea)
+
+# Visualizando as primeiras 5 linhas do dataframe resultante
+head(tumor_dgsea, 5)
+
+# Ordenando os genes pela expressão diferencial log2 de forma decrescente
+tumor_dgsea <- tumor_dgsea %>%
+  arrange(desc(expression_log2))
+
+# Realizando a análise DGSEA (Directed Gene Set Enrichment Analysis) para as vias Glycolysis e OXPHOS (Oxidative Phosphorylation)
+# Utilizando os dados do tecido adjacente para verificar o enriquecimento gênico nessas vias
+targeted.adjacente_dgsea <- dgsea_targeted(adjacente_dgsea, msigdb_pathways,
+                                           set.names[19], set.names[36])
+
+# Realizando a análise DGSEA para as vias Glycolysis e OXPHOS utilizando os dados do tecido tumoral
+targeted.tumor_dgsea <- dgsea_targeted(tumor_dgsea, msigdb_pathways,
+                                       set.names[19], set.names[36])
+
+# Gerando Mountain Plots para visualização dos resultados de DGSEA para o tecido adjacente
+adjacente_dgsea.mtn.plot <- make_mountain_plots(targeted.adjacente_dgsea, set.names[19], set.names[36])
+adjacente_dgsea.mtn.plot  # Exibe o gráfico
+
+# Gerando Mountain Plots para visualização dos resultados de DGSEA para o tecido tumoral
+tumor_dgsea.mtn.plot <- make_mountain_plots(targeted.tumor_dgsea, set.names[19], set.names[36])
+tumor_dgsea.mtn.plot  # Exibe o gráfico
+
+
+# Essa é a comparação principal ente os tecidos adjacentes e tumoral, agora vamos começar a fazer a comparação entre os tipos moleculares em relação estas duas vias
+
+
+
+```
+
+
+# Comparação entre TNBC x Adjacente, TNBC x Luminal A + Luminal B + HER2, Adjacente vs Luminal A + Luminal B + HER2
+
+
+# novamente com o MSig
+
+
+```{r}
+# Comparação entre TNBC x Adjacente, TNBC x Luminal A + Luminal B + HER2, Adjacente vs Luminal A + Luminal B + HER2
+
+# Passo 1: Trabalhando as amostras TNBC para a análise
+
+# Filtrando apenas as amostras do subtipo molecular TNBC
+# 'dadosamostras_2' é um dataframe que contém informações das amostras, como o subtipo molecular
+tnbc_samples <- dadosamostras_2$Sample[dadosamostras_2$Molecular_Subtype == "TNBC"]
+
+# O'tumor_samples' é o dataframe que contém os dados de expressão gênica das amostras tumorais
+# E 'tnbc_samples' é um vetor que contém os nomes das amostras que pertencem ao subtipo TNBC
+
+# Verificando quais amostras de 'tnbc_samples' estão presentes no dataframe 'tumor_samples'
+valid_samples <- tnbc_samples[tnbc_samples %in% colnames(tumor_samples)]
+
+# Adicionando a coluna "Gene" (que contém os nomes dos genes) às amostras válidas, caso esteja presente em 'tumor_samples'
+if ("Gene" %in% colnames(tumor_samples)) {
+  valid_samples <- c("Gene", valid_samples)
+}
+
+# Filtrando o dataframe 'tumor_samples' para incluir apenas as colunas correspondentes às amostras TNBC válidas
+filtered_tumor_samples <- tumor_samples[, c(valid_samples)]
+
+# Exibindo as primeiras linhas do dataframe filtrado para verificação
+head(filtered_tumor_samples)
+
+# Calculando a média de expressão gênica para as amostras TNBC
+mean_tnbc <- rowMeans(filtered_tumor_samples)
+
+# Passo 2: Criando uma lista para armazenar a expressão média dos genes em TNBC
+
+# Inicializando uma lista para armazenar os resultados do DGSEA para TNBC
+tnbc_dgsea <- NULL
+
+# Armazenando os nomes dos genes na lista 'tnbc_dgsea'
+tnbc_dgsea$Gene <- brca_rna_bind$gene_name
+
+# Calculando a expressão diferencial log2 entre as amostras TNBC e as amostras adjacentes (grupo de referência)
+# Utilizando o log2 da média de expressão em TNBC menos o log2 da média de expressão em tecido adjacente
+tnbc_dgsea$expression_log2 <- log2(mean_tnbc + 1) - log2(mean_adjacent + 1) # (grupo de referência)
+
+# Convertendo a lista 'tnbc_dgsea' em um dataframe para facilitar a manipulação
+tnbc_dgsea <- as.data.frame(tnbc_dgsea)
+
+# Exibindo as primeiras 5 linhas do dataframe resultante
+head(tnbc_dgsea, 5)
+
+# Ordenando os genes de forma decrescente de acordo com a expressão diferencial log2
+tnbc_dgsea <- tnbc_dgsea %>%
+  arrange(desc(expression_log2))
+
+# Passo 3: Realizando a análise DGSEA (Directed Gene Set Enrichment Analysis) para as vias Glycolysis e OXPHOS
+
+# Aplicando o DGSEA nos dados do subtipo TNBC, usando os conjuntos de genes de interesse 'Glycolysis' e 'OXPHOS' do objeto 'eita'
+targeted.tnbc_dgsea <- dgsea_targeted(tnbc_dgsea, msigdb_pathways,
+                                      set.names[19], set.names[36])
+
+# Passo 4: Gerando gráficos "Mountain Plots" para visualização dos resultados do DGSEA
+
+# Gerando um gráfico do tipo "Mountain Plot" para as vias Glycolysis e OXPHOS no subtipo TNBC
+tnbc_dgsea.mtn.plot <- make_mountain_plots(targeted.tnbc_dgsea, set.names[19], set.names[36])
+
+# Exibindo o gráfico gerado
+tnbc_dgsea.mtn.plot
+
+
+# Comparação Luminal A+B+HER2 vs Adjacente (grupo de referência)
+# Selecionando amostras classificadas como Câncer de Mama Triplo Negativo (TNBC)
+tnbc_tsamples <- dadosamostras_2_t$amostra[dadosamostras_2_t$molecular == "TNBC" & !is.na(dadosamostras_2_t$molecular)]
+
+# Atribuindo dados de expressão para genes para outra variavel para não prejudicar o arquivo base
+counts_ger_BRCA1 <- counts_ger_BRCA_a 
+
+# Removendo entradas duplicadas de genes para garantir nomes de genes únicos no conjunto de dados
+counts_ger_BRCA1 <- counts_ger_BRCA1 %>%
+  distinct(gene_name, .keep_all = TRUE)
+
+# Identificando amostras que não são TNBC para análises posteriores
+tnbc_tsamples_ex <- setdiff(names(counts_ger_BRCA1), tnbc_tsamples)
+
+# Extraindo dados de expressão para amostras que são Luminais A ou B e HER2 positivo, excluindo amostras TNBC
+lumab_her2 <- counts_ger_BRCA1[, tnbc_tsamples_ex]
+
+# Removendo as três primeiras colunas que podem conter metadados ou identificadores desnecessários para a análise
+lumab_her2 <- lumab_her2[,-c(1, 2, 3)]
+
+# Substituindo valores zero nos dados de expressão por um para evitar problemas com a transformação logarítmica
+lumab_her2[lumab_her2 == 0] <- 1
+
+# Calculando a média da expressão em todas as amostras selecionadas para cada gene
+mean_lumab_her2 <- rowMeans(lumab_her2)
+
+# Criando um novo dataframe para armazenar os valores de expressão transformados logarítmicamente para análises posteriores
+lumab_her2_dgsea <- NULL
+
+# Adicionando nomes de genes ao novo dataframe para referência
+lumab_her2_dgsea$Gene <- counts_ger_BRCA1$gene_name
+
+# Calculando a mudança na expressão log2 entre subtipos luminais e tecido normal adjacente (grupo de referência)
+lumab_her2_dgsea$expression_log2 <- log2(mean_lumab_her2 + 1) - log2(mean_adjacent + 1) # (grupo de referência)
+
+# Convertendo a lista em um dataframe para facilitar a manipulação e visualização
+lumab_her2_dgsea <- as.data.frame(lumab_her2_dgsea)
+
+# Ordenando o dataframe pelos valores de expressão transformados logarítmicamente em ordem decrescente para priorizar genes altamente expressos
+lumab_her2_dgsea <- lumab_her2_dgsea %>%
+  arrange(desc(expression_log2))
+
+# Exibindo as principais entradas do dataframe ordenado para inspecionar os resultados
+head(lumab_her2_dgsea)
+
+# Realizando Análise de Enriquecimento de Conjunto de Genes (GSEA) direcionada nos dados processados com caminhos específicos
+targeted.lumab_her2_dgsea <- dgsea_targeted(lumab_her2_dgsea, msigdb_pathways, set.names[19], set.names[36])
+
+# Gerando gráficos em montanha para visualizar os resultados da análise GSEA
+lumab_her2_dgsea.mtn.plot <- make_mountain_plots(targeted.lumab_her2_dgsea, set.names[19], set.names[36])
+
+# Exibindo o gráfico gerado para interpretação dos resultados da GSEA
+lumab_her2_dgsea.mtn.plot
+
+
+
+# Comparação entre Luminal A+B+HER2 (grupo de referência) vs. TNBC
+
+# Repetimos o processo de comparação, mas agora estamos comparando as amostras Luminal A+B+HER2 com as amostras TNBC.
+
+# Inicializando um novo dataframe para armazenar os resultados da expressão diferencial.
+tnbc_t_dgsea <- NULL
+
+# Atribuindo os nomes dos genes ao dataframe.
+tnbc_t_dgsea$Gene <- counts_ger_BRCA1$gene_name
+
+# Calculando a expressão log2 diferencial entre as amostras de Luminal A+B+HER2 e as amostras TNBC.
+tnbc_t_dgsea$expression_log2 <- log2(mean_tnbc + 1) - log2(mean_lumab_her2 + 1) # grupo de referência
+
+# Convertendo a lista em dataframe.
+tnbc_t_dgsea <- as.data.frame(tnbc_t_dgsea)
+
+# Visualizando as primeiras 5 linhas do dataframe resultante.
+head(tnbc_t_dgsea, 5)
+
+# Ordenando os genes em ordem decrescente de acordo com a expressão diferencial log2.
+tnbc_t_dgsea <- tnbc_t_dgsea %>%
+  arrange(desc(expression_log2))
+
+# Realizando o DGSEA para "Glycolysis" e "Oxidative Phosphorylation".
+targeted.tnbc_t_dgsea <- dgsea_targeted(tnbc_t_dgsea, msigdb_pathways, set.names[19], set.names[36])
+
+# Gerando gráficos tipo "Mountain Plot" para a comparação entre Luminal A+B+HER2 e TNBC.
+tnbc_t_dgsea.mtn.plot <- make_mountain_plots(targeted.tnbc_t_dgsea, set.names[19], set.names[36])
+
+# Exibindo o gráfico gerado.
+tnbc_t_dgsea.mtn.plot
+
+
+```
+
+
+# DGSEA para nossas amostras - KEGG
+
+```{r}
+# Importar dados
+library(RCurl)  # Biblioteca para manipulação de URLs e download de dados
+library(GSA)    # Biblioteca para Análise de Conjunto de Genes
+library(DGSEA)  # Biblioteca para Análise de Enriquecimento de Conjunto de Genes Diferencial
+
+# Ler os caminhos KEGG a partir de um arquivo GMT
+kegg.pathways <- GSA.read.gmt("https://raw.githubusercontent.com/JamesJoly/DGSEA/master/KEGG_metabolic_pathways.gmt")
+
+# Realizar análise direcionada examinando Glicólise Central - Oxidativa Fosforilação (OxPhos)
+set.names <- kegg.pathways$geneset.names  # Nomes dos conjuntos de genes
+
+# Função para inserir genes nos espaços em branco sem duplicatas
+insert_genes <- function(pathway_genes, genes_to_insert) {
+  # Identificar os índices dos espaços em branco
+  empty_indices <- which(pathway_genes == "")
+  
+  # Identificar genes já presentes no conjunto
+  existing_genes <- unique(pathway_genes[pathway_genes != ""])
+  
+  # Filtrar genes a serem inseridos para remover duplicatas
+  genes_to_insert <- genes_to_insert[!genes_to_insert %in% existing_genes]
+  
+  # Verificar se o número de genes a serem inseridos é maior que o número de espaços em branco
+  num_empty <- length(empty_indices)
+  num_to_insert <- length(genes_to_insert)
+  
+  if (num_to_insert > num_empty) {
+    # Truncar a lista de genes a serem inseridos
+    genes_to_insert <- genes_to_insert[1:num_empty]
+  }
+  
+  # Inserir genes filtrados nos espaços em branco
+  pathway_genes[empty_indices[1:length(genes_to_insert)]] <- genes_to_insert
+  
+  return(pathway_genes)
+}
+
+# Inserir genes_glico no primeiro conjunto de genes do kegg.pathways
+genes_glico <- c("ALDOA", "ALDOC", "ENO1", "ENO2", "ENO3", "FBP1", "FBP2", "G6PC", "GAPDH", "GAPDHS", 
+                 "GCK", "GPI", "HK1", "HK2", "HK3", "HKDC1", "LDHA", "LDHAL6B", "LDHB", "LDHC", 
+                 "PC", "PCK1", "PFKL", "PFKM", "PFKP", "PGAM1", "PGAM2", "PGAM4", "PGK1", 
+                 "PGK2", "PKLR", "PKM", "SLC2A1", "SLC2A2", "SLC2A3", "SLC2A4", 
+                 "SLC2A5", "TPI1")
+kegg.pathways[["genesets"]][[1]] <- insert_genes(kegg.pathways[["genesets"]][[1]], genes_glico)
+
+# Inserir genes_oxphos no segundo conjunto de genes do kegg.pathways
+genes_oxphos <- c("ADCK1", "ATP5F1A", "ATP5F1B", "ATP5F1C", "ATP5F1D", "ATP5F1E", "ATP5IF1", "ATP5MC1", 
+                  "ATP5MC2", "ATP5MC3", "ATP5MD", "ATP5ME", "ATP5MF", "ATP5MG", "ATP5MGL", "ATP5MPL", 
+                  "ATP5PB", "ATP5PD", "ATP5PF", "ATP5PO", "ATP6V1E1", "ATPAF1", "ATPAF2", "BCS1L", 
+                  "C15orf48", "CISD1", "CISD2", "CISD3", "CMC1", "COA1", "COA3", "COA4", 
+                  "COA5", "COA6", "COA7", "COQ10A", "COQ10B", "COQ8A", "COQ8B", "COX10", 
+                  "COX11", "COX14", "COX15", "COX16", "COX17", "COX18", "COX19", "COX20", 
+                  "COX4I1", "COX4I2", "COX5A", "COX5B", "COX6A1", "COX6A2", "COX6B1", "COX6B2", 
+                  "COX6C", "COX7A1", "COX7A2", "COX7A2L", "COX7B", "COX7B2", "COX7C", "COX8A", 
+                  "COX8BP", "COX8C", "CYC1", "CYCS", "D2HGDH", "DMAC1", "DMAC2", "DMAC2L", 
+                  "DONSON", "ECSIT", "ETFA", "ETFB", "ETFDH", "ETFRF1", "FMC1", "FOXRED1", 
+                  "GPD1", "GPD2", "HCCS", "HIGD1A", "HIGD2A", "LYRM7", "NDUFA1", "NDUFA10", 
+                  "NDUFA11", "NDUFA12", "NDUFA13", "NDUFA2", "NDUFA3", "NDUFA4", "NDUFA5", "NDUFA6", 
+                  "NDUFA7", "NDUFA8", "NDUFA9", "NDUFAB1", "NDUFAF1", "NDUFAF2", "NDUFAF3", "NDUFAF4", 
+                  "NDUFAF5", "NDUFAF6", "NDUFAF7", "NDUFAF8", "NDUFB1", "NDUFB10", "NDUFB11", "NDUFB2", 
+                  "NDUFB3", "NDUFB4", "NDUFB5", "NDUFB6", "NDUFB7", "NDUFB8", "NDUFB9", "NDUFC1", 
+                  "NDUFC2", "NDUFS1", "NDUFS2", "NDUFS3", "NDUFS4", "NDUFS5", "NDUFS6", "NDUFS7", 
+                  "NDUFS8", "NDUFV1", "NDUFV2", "NDUFV3", "NIPSNAP1", "NIPSNAP2", "NUBPL", "OXA1L", 
+                  "PET117", "PTCD2", "RTN4IP1", "SCO1", "SCO2", "SDHA", "SDHAF1", "SDHAF2", 
+                  "SDHAF3", "SDHAF4", "SDHB", "SDHC", "SDHD", "SURF1", "TBRG4", "TMEM126B", 
+                  "TMEM186", "TMEM70", "TSTD1", "TTC19", "UQCC1", "UQCC2", "UQCC3", "UQCR10", 
+                  "UQCR11", "UQCRB", "UQCRC1", "UQCRC2", "UQCRFS1", "UQCRH", "UQCRQ")
+kegg.pathways[["genesets"]][[2]] <- insert_genes(kegg.pathways[["genesets"]][[2]], genes_oxphos)
+
+# Visualizar os resultados dos conjuntos de genes atualizados
+print(kegg.pathways[["genesets"]][[1]])  # Exibir o primeiro conjunto de genes
+print(kegg.pathways[["genesets"]][[2]])  # Exibir o segundo conjunto de genes
+
+# Realizar análise direcionada examinando Glicólise Central - Oxidativa Fosforilação (OxPhos)
+set.names <- kegg.pathways$geneset.names  # Nomes dos conjuntos de genes
+
+# Separar as amostras de tecido adjacente e tecido tumoral primário
+adjacent_samples <- brca_rna_bind[, 4:116] # Amostras adjacentes (sem a primeira coluna)
+adjacent_samples[adjacent_samples == 0] <- 1   # Substituir zeros por um para evitar problemas logarítmicos
+
+tumor_samples <- brca_rna_bind[, 117:1098]  # Amostras tumorais (sem a primeira coluna)
+tumor_samples[tumor_samples == 0] <- 1   # Substituir zeros por um
+
+# Calcular a média de expressão em cada grupo
+mean_adjacent <- rowMeans(adjacent_samples)  # Média das amostras adjacentes
+mean_tumor <- rowMeans(tumor_samples)        # Média das amostras tumorais
+
+# Caracterizando uma lista com a média da expressão dos genes em tecido adjacente da mama
+adjacente_dgsea <- NULL
+adjacente_dgsea$Gene <- brca_rna_bind$gene_name   # Adicionar nomes dos genes ao dataframe
+
+# Calcular a diferença logarítmica entre as médias das expressões adjacentes e tumorais
+adjacente_dgsea$expression_log2 <- log2(mean_adjacent + 1) - log2(mean_tumor + 1) 
+
+adjacente_dgsea <- as.data.frame(adjacente_dgsea)   # Converter para dataframe
+
+head(adjacente_dgsea, 5)   # Exibir as primeiras cinco linhas do dataframe
+
+adjacente_dgsea <- adjacente_dgsea %>%
+  arrange(desc(expression_log2))   # Ordenar por expressão logarítmica em ordem decrescente
+
+# Para tumor, caracterizando uma lista com a média da expressão dos genes em tecido tumoral da mama
+tumor_dgsea <- NULL
+tumor_dgsea$Gene <- brca_rna_bind$gene_name   # Adicionar nomes dos genes ao dataframe
+
+# Calcular a diferença logarítmica entre as médias das expressões tumorais e adjacentes
+tumor_dgsea$expression_log2 <- log2(mean_tumor + 1) - log2(mean_adjacent + 1)
+
+tumor_dgsea <- as.data.frame(tumor_dgsea)   # Converter para dataframe
+
+head(tumor_dgsea, 5)   # Exibir as primeiras cinco linhas do dataframe
+
+tumor_dgsea <- tumor_dgsea %>%
+  arrange(desc(expression_log2))   # Ordenar por expressão logarítmica em ordem decrescente
+
+# Realizando o DGSEA para Glicólise e Oxidativa Fosforilação (OxPhos)
+targeted.adjacente_dgsea <- dgsea_targeted(adjacente_dgsea, kegg.pathways,
+                                  set.names[1], set.names[2])   # Análise DGSEA para tecido adjacente
+
+targeted.tumor_dgsea <- dgsea_targeted(tumor_dgsea, kegg.pathways,
+                                  set.names[1], set.names[2])   # Análise DGSEA para tecido tumoral
+
+# Gerar Gráficos em Montanha para os resultados do DGSEA em tecido adjacente
+adjacente_dgsea.mtn.plot <- make_mountain_plots(targeted.adjacente_dgsea, set.names[1], set.names[2])
+adjacente_dgsea.mtn.plot   # Exibir gráfico para tecido adjacente
+
+# Gerar Gráficos em Montanha para os resultados do DGSEA em tecido tumoral
+tumor_dgsea.mtn.plot <- make_mountain_plots(targeted.tumor_dgsea, set.names[1], set.names[2])
+tumor_dgsea.mtn.plot   # Exibir gráfico para tecido tumoral
+
+# Comparação entre TNBC x Adjacente, TNBC x Luminal A + Luminal B + HER2, Adjacente vs Luminal A + Luminal B + HER2
+
+# Passo 1: Trabalhando as amostras TNBC para a análise
+
+# Filtrando apenas as amostras do subtipo molecular TNBC
+# 'dadosamostras_2' é um dataframe que contém informações das amostras, como o subtipo molecular
+tnbc_samples <- dadosamostras_2$Sample[dadosamostras_2$Molecular_Subtype == "TNBC"]
+
+# O'tumor_samples' é o dataframe que contém os dados de expressão gênica das amostras tumorais
+# E 'tnbc_samples' é um vetor que contém os nomes das amostras que pertencem ao subtipo TNBC
+
+# Verificando quais amostras de 'tnbc_samples' estão presentes no dataframe 'tumor_samples'
+valid_samples <- tnbc_samples[tnbc_samples %in% colnames(tumor_samples)]
+
+# Adicionando a coluna "Gene" (que contém os nomes dos genes) às amostras válidas, caso esteja presente em 'tumor_samples'
+if ("Gene" %in% colnames(tumor_samples)) {
+  valid_samples <- c("Gene", valid_samples)
+}
+
+# Filtrando o dataframe 'tumor_samples' para incluir apenas as colunas correspondentes às amostras TNBC válidas
+filtered_tumor_samples <- tumor_samples[, c(valid_samples)]
+
+# Exibindo as primeiras linhas do dataframe filtrado para verificação
+head(filtered_tumor_samples)
+
+# Calculando a média de expressão gênica para as amostras TNBC
+mean_tnbc <- rowMeans(filtered_tumor_samples)
+
+# Passo 2: Criando uma lista para armazenar a expressão média dos genes em TNBC
+
+# Inicializando uma lista para armazenar os resultados do DGSEA para TNBC
+tnbc_dgsea <- NULL
+
+# Armazenando os nomes dos genes na lista 'tnbc_dgsea'
+tnbc_dgsea$Gene <- brca_rna_bind$gene_name
+
+# Calculando a expressão diferencial log2 entre as amostras TNBC e as amostras adjacentes (grupo de referência)
+# Utilizando o log2 da média de expressão em TNBC menos o log2 da média de expressão em tecido adjacente
+tnbc_dgsea$expression_log2 <- log2(mean_tnbc + 1) - log2(mean_adjacent + 1) # (grupo de referência)
+
+# Convertendo a lista 'tnbc_dgsea' em um dataframe para facilitar a manipulação
+tnbc_dgsea <- as.data.frame(tnbc_dgsea)
+
+# Exibindo as primeiras 5 linhas do dataframe resultante
+head(tnbc_dgsea, 5)
+
+# Ordenando os genes de forma decrescente de acordo com a expressão diferencial log2
+tnbc_dgsea <- tnbc_dgsea %>%
+  arrange(desc(expression_log2))
+
+# Passo 3: Realizando a análise DGSEA (Directed Gene Set Enrichment Analysis) para as vias Glycolysis e OXPHOS
+
+# Aplicando o DGSEA nos dados do subtipo TNBC, usando os conjuntos de genes de interesse 'Glycolysis' e 'OXPHOS' do objeto 'eita'
+targeted.tnbc_dgsea <- dgsea_targeted(tnbc_dgsea, kegg.pathways,
+                                      set.names[1], set.names[2])
+
+# Passo 4: Gerando gráficos "Mountain Plots" para visualização dos resultados do DGSEA
+
+# Gerando um gráfico do tipo "Mountain Plot" para as vias Glycolysis e OXPHOS no subtipo TNBC
+tnbc_dgsea.mtn.plot <- make_mountain_plots(targeted.tnbc_dgsea, set.names[1], set.names[2])
+
+# Exibindo o gráfico gerado
+tnbc_dgsea.mtn.plot
+
+
+# Comparação Luminal A+B+HER2 vs Adjacente (grupo de referência)
+# Selecionando amostras classificadas como Câncer de Mama Triplo Negativo (TNBC)
+tnbc_tsamples <- dadosamostras_2_t$amostra[dadosamostras_2_t$molecular == "TNBC" & !is.na(dadosamostras_2_t$molecular)]
+
+# Atribuindo dados de expressão para genes para outra variavel para não prejudicar o arquivo base
+counts_ger_BRCA1 <- counts_ger_BRCA_a 
+
+# Removendo entradas duplicadas de genes para garantir nomes de genes únicos no conjunto de dados
+counts_ger_BRCA1 <- counts_ger_BRCA1 %>%
+  distinct(gene_name, .keep_all = TRUE)
+
+# Identificando amostras que não são TNBC para análises posteriores
+tnbc_tsamples_ex <- setdiff(names(counts_ger_BRCA1), tnbc_tsamples)
+
+# Extraindo dados de expressão para amostras que são Luminais A ou B e HER2 positivo, excluindo amostras TNBC
+lumab_her2 <- counts_ger_BRCA1[, tnbc_tsamples_ex]
+
+# Removendo as três primeiras colunas que podem conter metadados ou identificadores desnecessários para a análise
+lumab_her2 <- lumab_her2[,-c(1, 2, 3)]
+
+# Substituindo valores zero nos dados de expressão por um para evitar problemas com a transformação logarítmica
+lumab_her2[lumab_her2 == 0] <- 1
+
+# Calculando a média da expressão em todas as amostras selecionadas para cada gene
+mean_lumab_her2 <- rowMeans(lumab_her2)
+
+# Criando um novo dataframe para armazenar os valores de expressão transformados logarítmicamente para análises posteriores
+lumab_her2_dgsea <- NULL
+
+# Adicionando nomes de genes ao novo dataframe para referência
+lumab_her2_dgsea$Gene <- counts_ger_BRCA1$gene_name
+
+# Calculando a mudança na expressão log2 entre subtipos luminais e tecido normal adjacente (grupo de referência)
+lumab_her2_dgsea$expression_log2 <- log2(mean_lumab_her2 + 1) - log2(mean_adjacent + 1) # (grupo de referência)
+
+# Convertendo a lista em um dataframe para facilitar a manipulação e visualização
+lumab_her2_dgsea <- as.data.frame(lumab_her2_dgsea)
+
+# Ordenando o dataframe pelos valores de expressão transformados logarítmicamente em ordem decrescente para priorizar genes altamente expressos
+lumab_her2_dgsea <- lumab_her2_dgsea %>%
+  arrange(desc(expression_log2))
+
+# Exibindo as principais entradas do dataframe ordenado para inspecionar os resultados
+head(lumab_her2_dgsea)
+
+# Realizando Análise de Enriquecimento de Conjunto de Genes (GSEA) direcionada nos dados processados com caminhos específicos
+targeted.lumab_her2_dgsea <- dgsea_targeted(lumab_her2_dgsea, kegg.pathways, set.names[1], set.names[2])
+
+# Gerando gráficos em montanha para visualizar os resultados da análise GSEA
+lumab_her2_dgsea.mtn.plot <- make_mountain_plots(targeted.lumab_her2_dgsea, set.names[1], set.names[2])
+
+# Exibindo o gráfico gerado para interpretação dos resultados da GSEA
+lumab_her2_dgsea.mtn.plot
+
+
+# Comparação entre Luminal A+B+HER2 (grupo de referência) vs. TNBC
+
+# Repetimos o processo de comparação, mas agora estamos comparando as amostras Luminal A+B+HER2 com as amostras TNBC.
+
+# Inicializando um novo dataframe para armazenar os resultados da expressão diferencial.
+tnbc_t_dgsea <- NULL
+
+# Atribuindo os nomes dos genes ao dataframe.
+tnbc_t_dgsea$Gene <- counts_ger_BRCA1$gene_name
+
+# Calculando a expressão log2 diferencial entre as amostras de Luminal A+B+HER2 e as amostras TNBC.
+tnbc_t_dgsea$expression_log2 <- log2(mean_tnbc + 1) - log2(mean_lumab_her2 + 1) # grupo de referência
+
+# Convertendo a lista em dataframe.
+tnbc_t_dgsea <- as.data.frame(tnbc_t_dgsea)
+
+# Visualizando as primeiras 5 linhas do dataframe resultante.
+head(tnbc_t_dgsea, 5)
+
+# Ordenando os genes em ordem decrescente de acordo com a expressão diferencial log2.
+tnbc_t_dgsea <- tnbc_t_dgsea %>%
+  arrange(desc(expression_log2))
+
+# Realizando o DGSEA para "Glycolysis" e "Oxidative Phosphorylation".
+targeted.tnbc_t_dgsea <- dgsea_targeted(tnbc_t_dgsea, kegg.pathways, set.names[1], set.names[2])
+
+# Gerando gráficos tipo "Mountain Plot" para a comparação entre Luminal A+B+HER2 e TNBC.
+tnbc_t_dgsea.mtn.plot <- make_mountain_plots(targeted.tnbc_t_dgsea, set.names[1], set.names[2])
+
+# Exibindo o gráfico gerado.
+tnbc_t_dgsea.mtn.plot
+
+
+```
